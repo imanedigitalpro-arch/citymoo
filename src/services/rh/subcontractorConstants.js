@@ -1,0 +1,157 @@
+/** Type d’affectation : % du budget global d’une opération / prestation projet. */
+export const REMUNERATION_PCT_BUDGET = '% du budget global';
+
+export const REMUNERATION_TYPES = [
+  'À la tâche',
+  'Au m²',
+  'Au ml',
+  'Au forfait',
+  'Par service',
+  REMUNERATION_PCT_BUDGET,
+  'Autre',
+];
+export const UNIT_TYPES = ['tâche', 'm²', 'ml', 'unité', 'forfait', 'jour', 'heure', '%'];
+export const ASSIGNMENT_STATUSES = ['active', 'terminée', 'suspendue', 'annulée'];
+export const SERVICE_STATUSES = ['pending', 'validated', 'rejected', 'paid'];
+export const PAYMENT_METHODS = ['espèces', 'virement', 'chèque', 'autre'];
+export const PAYMENT_STATUSES = ['pending', 'paid', 'partial', 'cancelled'];
+export const PAYMENT_TYPES = [
+  { id: 'metre', label: 'Par mètre travaillé' },
+  { id: 'tache', label: 'Par tâche réalisée' },
+  { id: 'service', label: 'Par service' },
+  { id: 'pourcentage', label: '% du budget global' },
+];
+export const PAYMENT_UNITS = ['m²', 'ml', 'm³', 'm', 'unité', 'forfait', '%'];
+export const PAYMENT_STATUS_UI = ['En attente', 'Payé', 'Partiel'];
+const PAYMENT_STATUS_UI_TO_DB = {
+  'En attente': 'pending',
+  'Payé': 'paid',
+  'Partiel': 'partial',
+};
+const PAYMENT_STATUS_DB_TO_UI = {
+  pending: 'En attente',
+  paid: 'Payé',
+  partial: 'Partiel',
+  cancelled: 'Annulé',
+};
+export function paymentStatusToDb(ui) {
+  return PAYMENT_STATUS_UI_TO_DB[ui] || ui;
+}
+export function paymentStatusFromDb(db) {
+  return PAYMENT_STATUS_DB_TO_UI[db] || db;
+}
+
+export function isPctBudgetRemuneration(type) {
+  return type === REMUNERATION_PCT_BUDGET;
+}
+
+export function isPctBudgetPayment(type) {
+  return type === 'pourcentage';
+}
+
+export const EMPTY_SUB_PAYMENT = {
+  projectId: '',
+  paymentDate: new Date().toISOString().slice(0, 10),
+  paymentType: 'metre',
+  paymentMethod: 'virement',
+  reference: '',
+  description: '',
+  statusUi: 'En attente',
+  selected: {},
+};
+
+export function calcSubPaymentAmount(type, line) {
+  if (type === 'metre') {
+    return Math.round((Number(line.quantity) || 0) * (Number(line.unitPrice) || 0) * 100) / 100;
+  }
+  if (type === 'pourcentage') {
+    return Math.round((Number(line.quantity) || 0) * (Number(line.unitPrice) || 0)) / 100;
+  }
+  return Math.round((Number(line.amount) || 0) * 100) / 100;
+}
+
+export function paymentTypeLabel(type) {
+  return PAYMENT_TYPES.find((t) => t.id === type)?.label || type || '—';
+}
+export const SUB_STATUTS = ['actif', 'inactif', 'suspendu', 'archive'];
+
+export const ASSIGNMENT_STATUS_LABEL = {
+  active: 'Active',
+  'terminée': 'Terminée',
+  suspendue: 'Suspendue',
+  'annulée': 'Annulée',
+};
+
+export const SERVICE_STATUS_LABEL = {
+  pending: 'En attente',
+  validated: 'Validée',
+  rejected: 'Rejetée',
+  paid: 'Payée',
+};
+
+export const PAYMENT_STATUS_LABEL = {
+  paid: 'Payé',
+  pending: 'En attente',
+  partial: 'Partiel',
+  cancelled: 'Annulé',
+};
+
+export const SUB_STATUT_LABEL = {
+  actif: 'Actif',
+  inactif: 'Inactif',
+  suspendu: 'Suspendu',
+  archive: 'Archivé',
+};
+
+export const PAYMENT_BALANCE_LABEL = {
+  'non payé': 'Non payé',
+  'partiellement payé': 'Partiellement payé',
+  'payé': 'Payé',
+};
+
+/** Métiers / fonctions sous-traitants (filtres + formulaires). */
+export const SUBCONTRACTOR_METIERS = [
+  'Ferrailleur',
+  'Coffreur',
+  'Maçon',
+  'Électricien',
+  'Plombier',
+  'Carreleur',
+  'Peintre',
+  'Menuisier',
+  'Climatisation',
+  'Aluminium',
+  'Caméra & Réseau',
+  'Gros œuvre',
+  'Second œuvre',
+  'TCE',
+];
+
+/** Types de documents attendus sur la fiche sous-traitant. */
+export const SUBCONTRACTOR_DOC_TYPES = [
+  { id: 'contrat', label: 'Contrat' },
+  { id: 'bon_commande', label: 'Bon de commande' },
+  { id: 'situation', label: 'Situation de travaux' },
+  { id: 'attachement', label: 'Attachement' },
+  { id: 'facture', label: 'Facture' },
+  { id: 'bon_paiement', label: 'Bon de paiement' },
+  { id: 'pv', label: 'Procès-verbal' },
+  { id: 'attestation', label: 'Attestation' },
+  { id: 'attestation_fiscale', label: 'Attestation fiscale' },
+  { id: 'assurance', label: 'Assurance' },
+  { id: 'cin', label: 'CIN' },
+  { id: 'rib', label: 'RIB' },
+  { id: 'rc', label: 'RC' },
+  { id: 'if', label: 'IF' },
+  { id: 'ice', label: 'ICE' },
+  { id: 'photos', label: 'Photos' },
+  { id: 'other', label: 'Autre' },
+];
+
+export const RETENTION_TYPES = [
+  { id: 'garantie', label: 'Retenue de garantie' },
+  { id: 'penalite', label: 'Pénalité' },
+  { id: 'avance_regulariser', label: 'Avance à régulariser' },
+  { id: 'administrative', label: 'Retenue administrative' },
+  { id: 'autre', label: 'Autre' },
+];

@@ -1,0 +1,363 @@
+/**
+ * purchasePdfShared.js — Utilitaires PDF module Achats CITYMO
+ */
+import { jsPDF } from 'jspdf';
+import { formatPdfMAD, formatPdfQty, formatPdfAmount, loadCompanyLogoFit } from '../finance/pdfShared';
+
+export const PDF_RED = [198, 40, 40];
+export const PDF_TEXT = [33, 33, 33];
+export const PDF_MUTED = [100, 100, 100];
+export const PDF_BORDER = [200, 200, 200];
+export const PDF_ROW_GRAY = [245, 245, 245];
+
+export const PAGE_W = 210;
+export const PAGE_H = 297;
+export const MARGIN = 14;
+export const CONTENT_W = PAGE_W - MARGIN * 2;
+
+const COMPANY_LINES = [
+  '228 Bd Mohammed V, Casablanca 20000',
+  'Tél : +212 52 231 0043',
+  'contact@citymo.ma',
+];
+
+export function dash(v) {
+  const s = v == null ? '' : String(v).trim();
+  if (!s || s === '—' || s === '\u2014') return '-';
+  return s;
+}
+
+/** Valeurs sûres pour jsPDF (Helvetica standard = pas de glyphes Unicode étendus). */
+export function pdfSafeText(v) {
+  return dash(v)
+    .replace(/\u00A0/g, ' ')
+    .replace(/\u2014/g, '-')
+    .replace(/\u2013/g, '-')
+    .replace(/\u2026/g, '...');
+}
+
+export function fmtDate(d) {
+  if (!d) return '-';
+  try {
+    const raw = String(d).slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+      return new Date(`${raw}T12:00:00`).toLocaleDateString('fr-FR', {
+        day: '2-digit', month: '2-digit', year: 'numeric',
+      });
+    }
+    return new Date(d).toLocaleDateString('fr-FR', {
+      day: '2-digit', month: '2-digit', year: 'numeric',
+    });
+  } catch {
+    return String(d);
+  }
+}
+
+export function safeFilename(ref, prefix) {
+  const slug = String(ref || 'doc')
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/[^\w\-àâäéèêëïîôùûüçÀÂÄÉÈÊËÏÎÔÙÛÜÇ.-]/gi, '')
+    || 'doc';
+  return `${prefix}-${slug}.pdf`;
+}
+
+export function downloadPdfBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+  if (isIOS) {
+    window.open(url, '_blank');
+    setTimeout(() => URL.revokeObjectURL(url), 120_000);
+    return;
+  }
+
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+export function createAchatsPdfDoc() {
+  return new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait' });
+}
+
+/** En-tête CITYMO : logo à gauche, titre rouge à droite, ligne rouge */
+export async function drawAchatsHeader(doc, title, metaRows = []) {
+  const logo = await loadCompanyLogoFit(42, 16);
+  let y = MARGIN;
+
+  if (logo) {
+    doc.addImage(logo.dataUrl, 'PNG', MARGIN, y, logo.w, logo.h);
+  }
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.5);
+  doc.setTextColor(...PDF_MUTED);
+  let infoY = y + 2;
+  COMPANY_LINES.forEach((line) => {
+    doc.text(line, MARGIN + 48, infoY);
+    infoY += 3.6;
+  });
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(16);
+  doc.setTextColor(...PDF_RED);
+  doc.text(title, PAGE_W - MARGIN, y + 8, { align: 'right' });
+
+  y = Math.max(y + 20, infoY + 2);
+
+  if (metaRows.length) {
+    doc.setFontSize(8.5);
+    metaRows.forEach(([label, value], i) => {
+      const col = i % 2;
+      const row = Math.floor(i / 2);
+      const x = col === 0 ? MARGIN : MARGIN + CONTENT_W / 2;
+      const my = y + row * 5.5;
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(...PDF_MUTED);
+      doc.text(`${label} :`, x, my);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(...PDF_TEXT);
+      doc.text(pdfSafeText(dash(value)), x + 28, my);
+    });
+    y += Math.ceil(metaRows.length / 2) * 5.5 + 4;
+  }
+
+  doc.setDrawColor(...PDF_RED);
+  doc.setLineWidth(0.6);
+  doc.line(MARGIN, y, PAGE_W - MARGIN, y);
+  return y + 8;
+}
+
+export function drawSectionTitle(doc, title, y) {
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(10);
+  doc.setTextColor(...PDF_RED);
+  doc.text(title, MARGIN, y);
+  doc.setDrawColor(...PDF_RED);
+  doc.setLineWidth(0.3);
+  doc.line(MARGIN, y + 1.5, PAGE_W - MARGIN, y + 1.5);
+  return y + 8;
+}
+
+export function drawKeyValueTable(doc, rows, startY) {
+  const col1W = CONTENT_W * 0.36;
+  const col2W = CONTENT_W - col1W;
+  let y = startY;
+
+  rows.forEach(([label, value]) => {
+    const val = dash(value);
+    doc.setFontSize(9);
+    const valueLines = val === '-' ? ['-'] : doc.splitTextToSize(val, col2W - 6);
+    const rowH = Math.max(7, valueLines.length * 4 + 3);
+
+    doc.setFillColor(...PDF_ROW_GRAY);
+    doc.rect(MARGIN, y, col1W, rowH, 'F');
+    doc.setFillColor(255, 255, 255);
+    doc.rect(MARGIN + col1W, y, col2W, rowH, 'F');
+    doc.setDrawColor(...PDF_BORDER);
+    doc.setLineWidth(0.15);
+    doc.rect(MARGIN, y, CONTENT_W, rowH);
+    doc.line(MARGIN + col1W, y, MARGIN + col1W, y + rowH);
+
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(...PDF_MUTED);
+    doc.text(pdfSafeText(label), MARGIN + 3, y + 5);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(...PDF_TEXT);
+    doc.text(valueLines.map((line) => pdfSafeText(line)), MARGIN + col1W + 3, y + 5);
+    y += rowH;
+  });
+
+  return y + 4;
+}
+
+function drawCellBorder(doc, x, y, w, h) {
+  doc.setDrawColor(...PDF_BORDER);
+  doc.setLineWidth(0.12);
+  doc.rect(x, y, w, h);
+}
+
+function fillCellBackground(doc, x, y, w, h, shaded) {
+  doc.setFillColor(...(shaded ? PDF_ROW_GRAY : [255, 255, 255]));
+  doc.rect(x, y, w, h, 'F');
+}
+
+function textRight(doc, text, rightX, y) {
+  doc.text(String(text ?? '-'), rightX, y, { align: 'right' });
+}
+
+function textCenter(doc, text, centerX, y) {
+  doc.text(String(text ?? '-'), centerX, y, { align: 'center' });
+}
+
+function formatDataCellText(col, raw, row) {
+  if (col.format) return pdfSafeText(String(col.format(raw, row) ?? '-'));
+  return pdfSafeText(dash(raw));
+}
+
+function drawAlignedCellText(doc, text, x, y, w, h, align = 'left') {
+  const pad = 2;
+  const midY = y + h / 2 + 1;
+  const val = String(text ?? '-');
+  if (align === 'right') {
+    textRight(doc, val, x + w - pad, midY);
+    return;
+  }
+  if (align === 'center') {
+    textCenter(doc, val, x + w / 2, midY);
+    return;
+  }
+  doc.text(val, x + pad, midY);
+}
+
+/** Tableau à colonnes — bordures uniquement, montants alignés à droite (compatible jsPDF). */
+export function drawDataTable(doc, columns, rows, startY) {
+  const totalW = CONTENT_W;
+  const colWidths = columns.map((c) => c.width || totalW / columns.length);
+  const sumW = colWidths.reduce((a, b) => a + b, 0);
+  const scale = totalW / sumW;
+  const widths = colWidths.map((w) => w * scale);
+
+  let y = startY;
+  const headerH = 8;
+
+  doc.setFillColor(...PDF_RED);
+  doc.rect(MARGIN, y, totalW, headerH, 'F');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8);
+  doc.setTextColor(255, 255, 255);
+
+  let x = MARGIN;
+  columns.forEach((col, i) => {
+    const align = col.align || 'left';
+    drawAlignedCellText(doc, col.label || '', x, y, widths[i], headerH, align);
+    x += widths[i];
+  });
+  y += headerH;
+
+  rows.forEach((row, ri) => {
+    const cells = columns.map((col, i) => {
+      const text = formatDataCellText(col, row[col.key], row);
+      const align = col.align || (i === 0 ? 'left' : 'right');
+      if (col.wrap) {
+        return {
+          align,
+          lines: doc.splitTextToSize(text, Math.max(12, widths[i] - 4)),
+        };
+      }
+      return { align, lines: [text] };
+    });
+
+    const rowH = Math.max(
+      7,
+      ...cells.map((c) => (c.lines.length > 1 ? c.lines.length * 3.8 + 2 : 7)),
+    );
+
+    x = MARGIN;
+    columns.forEach((col, i) => {
+      const { lines, align } = cells[i];
+      const shaded = ri % 2 === 1;
+      fillCellBackground(doc, x, y, widths[i], rowH, shaded);
+      drawCellBorder(doc, x, y, widths[i], rowH);
+
+      doc.setFont('helvetica', col.bold ? 'bold' : 'normal');
+      doc.setFontSize(8);
+      doc.setTextColor(...PDF_TEXT);
+
+      if (lines.length > 1 || col.wrap) {
+        let ty = y + 4.5;
+        lines.forEach((line) => {
+          doc.text(String(line), x + 2, ty);
+          ty += 3.8;
+        });
+      } else {
+        drawAlignedCellText(doc, lines[0], x, y, widths[i], rowH, align);
+      }
+
+      x += widths[i];
+    });
+    y += rowH;
+  });
+
+  return y + 6;
+}
+
+export function drawSignatureBoxes(doc, labels, startY, boxH = 22) {
+  const gap = 6;
+  const boxW = (CONTENT_W - gap * (labels.length - 1)) / labels.length;
+  let y = startY;
+
+  labels.forEach((label, i) => {
+    const x = MARGIN + i * (boxW + gap);
+    doc.setDrawColor(...PDF_BORDER);
+    doc.setLineWidth(0.25);
+    doc.rect(x, y, boxW, boxH);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.5);
+    doc.setTextColor(...PDF_MUTED);
+    doc.text(label, x + boxW / 2, y + boxH + 4.5, { align: 'center' });
+    doc.setFont('helvetica', 'italic');
+    doc.setFontSize(7);
+    doc.setTextColor(160, 160, 160);
+    doc.text('Date : _______________', x + boxW / 2, y + boxH + 9, { align: 'center' });
+  });
+
+  return y + boxH + 14;
+}
+
+export function drawFooter(doc, text) {
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7);
+  doc.setTextColor(...PDF_MUTED);
+  doc.text(text, PAGE_W / 2, PAGE_H - 10, { align: 'center' });
+}
+
+export function normalizeRequestLines(request) {
+  const lines = request?.payload?.lines || request?.lines || [];
+  if (!lines.length && request?.titre) {
+    return [{
+      designation: request.titre,
+      quantite: '—',
+      unite: '—',
+      observation: request.description || '—',
+    }];
+  }
+  return lines.map((l) => ({
+    designation: l.designation || l.article_name || l.libelle || l.titre || '—',
+    quantite: l.quantite ?? l.quantite_demandee ?? l.qty ?? '—',
+    unite: l.unite || l.unit || 'u',
+    fournisseur: l.fournisseur || '—',
+    observation: l.observation || l.observations || (l.rupture ? 'Rupture stock' : '—'),
+  }));
+}
+
+export function normalizeOaLines(oa) {
+  const lines = oa?.lines || [];
+  if (!lines.length) {
+    return [{
+      designation: oa?.objet || '—',
+      quantite: 1,
+      prix_unitaire: oa?.montant_ht || 0,
+      total_ht: oa?.montant_ht || 0,
+    }];
+  }
+  return lines.map((l) => {
+    const qty = Number(l.quantite ?? l.qty ?? 1) || 1;
+    const pu = Number(l.prix_unitaire ?? l.prix_ht ?? l.montant_ht) || 0;
+    return {
+      designation: l.designation || l.article_name || l.libelle || '—',
+      quantite: qty,
+      prix_unitaire: pu,
+      total_ht: Number(l.total_ht ?? l.montant_ht) || qty * pu,
+    };
+  });
+}
+
+export { formatPdfMAD, formatPdfQty, formatPdfAmount };

@@ -1,0 +1,1504 @@
+/**
+ * DemandesChantier.jsx — Demandes matériel chantier (Inventaire & Dépôt)
+ */
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import {
+  ClipboardList, Plus, Search, RefreshCw, Loader2, Eye, Edit2, Trash2,
+  Download, CheckCircle, Truck, Package, X, ShoppingCart,
+} from 'lucide-react';
+import { listProjects } from '../../services/projects/projects';
+import { listStockArticles } from '../../services/inventaire/stockArticles';
+import {
+  SITE_REQUEST_STATUTS,
+  SITE_REQUEST_PRIORITES,
+  siteRequestStatutColor,
+  siteRequestPreparationStatut,
+  siteRequestLivraisonStatut,
+  isManualSiteRequest,
+} from '../../constants/siteMaterialRequests';
+import {
+  listSiteMaterialRequests,
+  getSiteMaterialRequest,
+  createSiteMaterialRequest,
+  updateSiteMaterialRequest,
+  updateSiteMaterialRequestHeader,
+  submitSiteMaterialRequest,
+  prepareSiteMaterialRequest,
+  requestDgValidation,
+  validateSiteRequestDg,
+  markSiteRequestReady,
+  deliverSiteMaterialRequest,
+  cancelSiteMaterialRequest,
+  deleteSiteMaterialRequest,
+  enrichLinesWithStock,
+  setSiteMaterialRequestStatut,
+  setSiteMaterialRequestLivraison,
+  siteRequestLivraisonValue,
+  getSiteRequestMissingLines,
+  qtyMissingOnLine,
+} from '../../services/inventaire/siteMaterialRequests';
+import {
+  createPurchaseRequestFromSiteRuptures,
+  findPurchaseRequestBySiteMaterialRequest,
+} from '../../services/achats/purchaseRequests';
+import { generateSiteRequestPdf } from '../../services/inventaire/siteRequestPdf';
+import { buildInitialLines } from './SiteRequestForm.jsx';
+import SiteRequestFormPage from './SiteRequestFormPage.jsx';
+import SiteRequestCreateModeModal from './SiteRequestCreateModeModal.jsx';
+import SiteRequestManualFormPage, { buildManualLines } from './SiteRequestManualFormPage.jsx';
+import ArticleScanBar from './ArticleScanBar.jsx';
+import { useArticleScanner } from '../../hooks/useArticleScanner';
+import {
+  matchRequestLineByArticle,
+  incrementPreparedLine,
+  isLineFullyPrepared,
+} from '../../services/inventaire/articleScanWorkflow';
+import { KpiCard, INPUT_STYLE, SELECT_STYLE } from './shared.jsx';
+
+const EMPTY_FORM = {
+  project_id: '', project_ref: '', project_name: '', client_name: '',
+  chef_projet: '', chef_chantier: '',
+  date_demande: new Date().toISOString().slice(0, 10),
+  date_souhaitee: '', priorite: 'Normale', observation: '',
+  origine: 'catalogue',
+};
+
+function fmtDate(d) {
+  if (!d) return '—';
+  try { return new Date(`${String(d).slice(0, 10)}T12:00:00`).toLocaleDateString('fr-FR'); } catch { return d; }
+}
+
+function fmtDateTime(d) {
+  if (!d) return '—';
+  try { return new Date(d).toLocaleString('fr-FR'); } catch { return d; }
+}
+
+
+function prepBadgeClass(statut) {
+  if (['prete', 'validee_dg', 'livree'].includes(statut)) return 'badge-green';
+  if (['en_preparation', 'preparation_partielle', 'en_attente_dg'].includes(statut)) return 'badge-orange';
+  if (statut === 'soumise') return 'badge-blue';
+  return 'badge-grey';
+}
+
+function livBadgeClass(statut) {
+  if (statut === 'livree') return 'badge-green';
+  if (['prete', 'validee_dg'].includes(statut)) return 'badge-blue';
+  return 'badge-grey';
+}
+
+function getRowActions(r, handlers, { embedded = false } = {}) {
+  const actions = [
+    { key: 'view', label: 'Voir', icon: Eye, onClick: () => handlers.openDetail(r.id) },
+    { key: 'pdf', label: 'Télécharger PDF', icon: Download, onClick: () => handlers.handlePdf(r.id) },
+  ];
+  if (r.statut === 'brouillon') {
+    actions.push({ key: 'edit', label: 'Modifier', icon: Edit2, onClick: () => handlers.openEdit(r.id) });
+  }
+  if (r.statut !== 'livree') {
+    actions.push({ key: 'delete', label: 'Supprimer', icon: Trash2, danger: true, onClick: () => handlers.handleDelete(r.id) });
+  }
+  if (embedded) return actions;
+  if (r.statut === 'soumise') {
+    actions.push({ key: 'prepare', label: 'Préparer', icon: Package, onClick: () => handlers.openDetail(r.id) });
+  }
+  if (['en_preparation', 'preparation_partielle', 'en_attente_dg'].includes(r.statut)) {
+    actions.push({ key: 'validate', label: 'Valider', icon: CheckCircle, onClick: () => handlers.openDetail(r.id) });
+  }
+  if (['prete', 'validee_dg'].includes(r.statut)) {
+    actions.push({ key: 'deliver', label: 'Livrer', icon: Truck, onClick: () => handlers.openDetail(r.id) });
+  }
+  return actions;
+}
+
+function projectFormFromProjet(projet) {
+  if (!projet) return {};
+  return {
+    project_id: projet.id,
+    project_ref: projet.ref || '',
+    project_name: projet.nom || projet.name || '',
+    client_name: projet.client || projet.client_nom || '',
+    chef_projet: projet.chef_projet || projet.responsable || '',
+    chef_chantier: projet.chef_chantier || '',
+  };
+}
+
+export default function DemandesChantier({ projet, embedded = false, onNavigate }) {
+  const embeddedProjectId = embedded && projet?.id ? String(projet.id) : null;
+  const [requests, setRequests] = useState([]);
+  const [projects, setProjects] = useState([]);
+  const [stockArticles, setStockArticles] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [search, setSearch] = useState('');
+  const [statutFilter, setStatutFilter] = useState('');
+  const [prioriteFilter, setPrioriteFilter] = useState('');
+  const [view, setView] = useState('list');
+  const [formMode, setFormMode] = useState('catalogue');
+  const [showCreateMode, setShowCreateMode] = useState(false);
+  const [editId, setEditId] = useState(null);
+  const [detail, setDetail] = useState(null);
+  const [linkedDa, setLinkedDa] = useState(null);
+  const [detailRecap, setDetailRecap] = useState(null);
+  const [form, setForm] = useState(EMPTY_FORM);
+  const [lines, setLines] = useState(() => buildInitialLines());
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const [rows, projs, arts] = await Promise.all([
+        listSiteMaterialRequests({
+          statut: statutFilter,
+          priorite: prioriteFilter,
+          projectId: embeddedProjectId || undefined,
+        }),
+        embedded ? Promise.resolve(projet ? [projet] : []) : listProjects(),
+        listStockArticles(),
+      ]);
+      setRequests(rows);
+      setProjects(projs || []);
+      setStockArticles(arts || []);
+    } catch (err) {
+      setError(err.message || 'Erreur de chargement.');
+    } finally {
+      setLoading(false);
+    }
+  }, [statutFilter, prioriteFilter, embeddedProjectId, embedded, projet]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const filtered = useMemo(() => {
+    const q = search.toLowerCase().trim();
+    if (!q) return requests;
+    return requests.filter((r) =>
+      (r.ref || '').toLowerCase().includes(q)
+      || (r.project_name || '').toLowerCase().includes(q)
+      || (r.client_name || '').toLowerCase().includes(q)
+      || (r.chef_chantier || '').toLowerCase().includes(q)
+      || (r.chef_projet || '').toLowerCase().includes(q),
+    );
+  }, [requests, search]);
+
+  const stats = useMemo(() => ({
+    total: requests.length,
+    soumises: requests.filter((r) => r.statut === 'soumise').length,
+    preparation: requests.filter((r) => ['en_preparation', 'preparation_partielle'].includes(r.statut)).length,
+    pretes: requests.filter((r) => r.statut === 'prete').length,
+  }), [requests]);
+
+  function openCreateChooser() {
+    setShowCreateMode(true);
+  }
+
+  function openCreateCatalogue() {
+    setShowCreateMode(false);
+    setEditId(null);
+    setFormMode('catalogue');
+    const base = {
+      ...EMPTY_FORM,
+      date_demande: new Date().toISOString().slice(0, 10),
+      origine: 'catalogue',
+    };
+    if (embedded && projet) Object.assign(base, projectFormFromProjet(projet));
+    setForm(base);
+    setLines(buildInitialLines());
+    setError('');
+    setView('form');
+  }
+
+  function openCreateManual() {
+    setShowCreateMode(false);
+    setEditId(null);
+    setFormMode('manuelle');
+    const base = {
+      ...EMPTY_FORM,
+      date_demande: new Date().toISOString().slice(0, 10),
+      origine: 'manuelle',
+    };
+    if (embedded && projet) Object.assign(base, projectFormFromProjet(projet));
+    setForm(base);
+    setLines(buildManualLines());
+    setError('');
+    setView('form');
+  }
+
+  async function openEdit(id) {
+    setSaving(true);
+    try {
+      const req = await getSiteMaterialRequest(id);
+      const manual = isManualSiteRequest(req);
+      setEditId(id);
+      setFormMode(manual ? 'manuelle' : 'catalogue');
+      setForm({
+        ref: req.ref,
+        project_id: req.project_id || '',
+        project_ref: req.project_ref,
+        project_name: req.project_name,
+        client_name: req.client_name,
+        chef_projet: req.chef_projet,
+        chef_chantier: req.chef_chantier,
+        date_demande: req.date_demande,
+        date_souhaitee: req.date_souhaitee,
+        priorite: req.priorite,
+        observation: req.observation,
+        origine: manual ? 'manuelle' : 'catalogue',
+      });
+      setLines(manual ? buildManualLines(req.lines) : buildInitialLines(req.lines));
+      setError('');
+      setView('form');
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function syncDetailRecap(req) {
+    if (!req) {
+      setDetailRecap(null);
+      return;
+    }
+    setDetailRecap({
+      client_name: req.client_name || '',
+      chef_chantier: req.chef_chantier || '',
+      chef_projet: req.chef_projet || '',
+      priorite: req.priorite || 'Normale',
+      date_souhaitee: req.date_souhaitee || '',
+      observation: req.observation || '',
+    });
+  }
+
+  async function openDetail(id) {
+    setSaving(true);
+    try {
+      const req = await getSiteMaterialRequest(id);
+      setDetail(req);
+      syncDetailRecap(req);
+      const da = await findPurchaseRequestBySiteMaterialRequest(id).catch(() => null);
+      setLinkedDa(da);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function closeDetail() {
+    setDetail(null);
+    setLinkedDa(null);
+    setDetailRecap(null);
+  }
+
+  function closeForm() {
+    setView('list');
+    setEditId(null);
+    setFormMode('catalogue');
+    setError('');
+  }
+
+  async function handleSave(submitAfter = false, linesOverride = null) {
+    if (!form.project_id) {
+      setError('Sélectionnez un projet.');
+      return;
+    }
+    setSaving(true);
+    setError('');
+    try {
+      const payload = {
+        ...form,
+        origine: formMode === 'manuelle' ? 'manuelle' : (form.origine || 'catalogue'),
+      };
+      const linesToSave = linesOverride || lines;
+      let req;
+      if (editId) {
+        req = await updateSiteMaterialRequest(editId, payload, linesToSave);
+      } else {
+        req = await createSiteMaterialRequest(payload, linesToSave);
+        setEditId(req.id);
+      }
+      if (submitAfter) {
+        await submitSiteMaterialRequest(req.id);
+        if (embedded) {
+          alert('Besoin matériel soumis — la demande a été transmise au magasinier.');
+        }
+      }
+      closeForm();
+      await load();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function runAction(fn) {
+    if (!detail) return;
+    await runActionOn(detail.id, fn);
+  }
+
+  async function runActionOn(id, fn) {
+    setSaving(true);
+    setError('');
+    try {
+      const updated = await fn(id);
+      if (detail?.id === id) {
+        setDetail(updated);
+        syncDetailRecap(updated);
+        const da = await findPurchaseRequestBySiteMaterialRequest(id).catch(() => null);
+        setLinkedDa(da);
+      }
+      await load();
+      return updated;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleSaveDetailRecap() {
+    if (!detail || !detailRecap) return;
+    if (detail.statut === 'annulee') {
+      setError('Demande annulée — modification impossible.');
+      return;
+    }
+    setSaving(true);
+    setError('');
+    try {
+      const updated = await updateSiteMaterialRequestHeader(detail.id, detailRecap);
+      setDetail(updated);
+      syncDetailRecap(updated);
+      await load();
+    } catch (err) {
+      setError(err.message || 'Erreur enregistrement récap.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function setRecapField(key, value) {
+    setDetailRecap((prev) => (prev ? { ...prev, [key]: value } : prev));
+  }
+
+  async function handleStatutChange(id, nextStatut, currentStatut) {
+    if (!id || nextStatut === currentStatut) return;
+    if (nextStatut === 'livree') {
+      const ok = window.confirm(
+        'Marquer comme livrée ? Un bon de sortie stock sera généré si des articles catalogue sont liés.',
+      );
+      if (!ok) return;
+    }
+    if (nextStatut === 'annulee') {
+      const reason = window.prompt('Motif d\'annulation :') || '';
+      if (!reason.trim()) return;
+      await runActionOn(id, (rid) => setSiteMaterialRequestStatut(rid, nextStatut, { reason }));
+      return;
+    }
+    await runActionOn(id, (rid) => setSiteMaterialRequestStatut(rid, nextStatut));
+  }
+
+  async function handleLivraisonChange(id, nextLiv, currentStatut) {
+    if (!id) return;
+    const current = siteRequestLivraisonValue(currentStatut);
+    if (nextLiv === current) return;
+    if (nextLiv === 'livree') {
+      const ok = window.confirm(
+        'Confirmer la livraison ? Un bon de sortie stock sera généré si possible.',
+      );
+      if (!ok) return;
+    }
+    await runActionOn(id, (rid) => setSiteMaterialRequestLivraison(rid, nextLiv));
+  }
+
+  async function handleCreateDaFromMissing(request = detail) {
+    if (!request) return;
+    const missing = getSiteRequestMissingLines(request);
+    if (!missing.length) {
+      setError('Aucun article manquant — tout est préparé.');
+      return;
+    }
+    setSaving(true);
+    setError('');
+    try {
+      const da = await createPurchaseRequestFromSiteRuptures(request, { refresh: true });
+      if (!da) {
+        setError('Impossible de créer la demande d\'achat.');
+        return;
+      }
+      if (detail?.id === request.id) setLinkedDa(da);
+      const ref = da.ref || da.ref_demande || '';
+      const go = window.confirm(
+        `Demande d'achat ${ref || ''} prête (reste de commande).\n\nOuvrir le module Achats ?`,
+      );
+      if (go && onNavigate) onNavigate('demandes-achat');
+    } catch (err) {
+      setError(err.message || 'Erreur création demande d\'achat.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDelete(id) {
+    if (!window.confirm('Supprimer cette demande chantier ? Cette action est irréversible.')) return;
+    setSaving(true);
+    try {
+      await deleteSiteMaterialRequest(id);
+      if (detail?.id === id) closeDetail();
+      await load();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handlePdf(id) {
+    setSaving(true);
+    setError('');
+    try {
+      const full = await getSiteMaterialRequest(id);
+      await generateSiteRequestPdf(full);
+    } catch (err) {
+      setError(err.message || 'Erreur lors de la génération du PDF.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const rowHandlers = { openDetail, openEdit, handlePdf, handleDelete };
+
+  function updateDetailLine(lineId, patch) {
+    setDetail((prev) => ({
+      ...prev,
+      lines: prev.lines.map((l) => (l.id === lineId ? { ...l, ...patch } : l)),
+    }));
+  }
+
+  function setLineAvailability(line, status) {
+    const demandee = Number(line.quantite_demandee) || 0;
+    if (status === 'ok') {
+      updateDetailLine(line.id, {
+        disponible: true,
+        rupture: false,
+        quantite_preparee: demandee,
+      });
+      return;
+    }
+    if (status === 'partial') {
+      const prep = Math.min(Number(line.quantite_preparee) || 0, demandee);
+      updateDetailLine(line.id, {
+        disponible: false,
+        rupture: false,
+        quantite_preparee: prep > 0 && prep < demandee ? prep : Math.max(1, Math.floor(demandee / 2)),
+      });
+      return;
+    }
+    updateDetailLine(line.id, {
+      disponible: false,
+      rupture: true,
+      quantite_preparee: 0,
+    });
+  }
+
+  function associateLineToArticle(line, articleId) {
+    const art = stockArticles.find((a) => String(a.id) === String(articleId));
+    if (!art) {
+      updateDetailLine(line.id, { article_id: null });
+      return;
+    }
+    const enriched = enrichLinesWithStock([{
+      ...line,
+      article_id: art.id,
+      article_name: line.article_name || art.nom || art.designation,
+    }], stockArticles)[0];
+    updateDetailLine(line.id, {
+      article_id: art.id,
+      stock_actuel: enriched.stock_actuel,
+      disponible: enriched.disponible,
+      rupture: enriched.rupture,
+      stock_status: enriched.stock_status,
+    });
+  }
+
+  function lineAvailabilityStatus(line) {
+    const demandee = Number(line.quantite_demandee) || 0;
+    const prep = Number(line.quantite_preparee) || 0;
+    if (line.rupture || prep <= 0) return 'none';
+    if (line.disponible && prep >= demandee) return 'ok';
+    if (prep > 0 && prep < demandee) return 'partial';
+    if (prep >= demandee) return 'ok';
+    return 'partial';
+  }
+
+  function qtyToBuy(line) {
+    return qtyMissingOnLine(line);
+  }
+
+  const missingLines = useMemo(
+    () => (detail ? getSiteRequestMissingLines(detail) : []),
+    [detail],
+  );
+  const missingQtyTotal = useMemo(
+    () => missingLines.reduce((s, l) => s + (Number(l.quantite_manquante) || 0), 0),
+    [missingLines],
+  );
+
+  const canScanPreparation = detail
+    && !embedded
+    && ['soumise', 'en_preparation', 'preparation_partielle', 'en_attente_dg', 'validee_dg'].includes(detail.statut)
+    && !['prete', 'livree', 'annulee'].includes(detail.statut);
+
+  const detailRef = useRef(detail);
+  detailRef.current = detail;
+
+  const {
+    handleScan: handlePrepScan,
+    scanning: prepScanning,
+    scanError: prepScanError,
+    scanSuccess: prepScanSuccess,
+  } = useArticleScanner({
+    articles: stockArticles,
+    validateFound: (article) => {
+      const d = detailRef.current;
+      if (!d) return false;
+      const active = (d.lines || []).filter((l) => Number(l.quantite_demandee) > 0);
+      return !!matchRequestLineByArticle(active, article);
+    },
+    onFound: (article) => {
+      const d = detailRef.current;
+      if (!d) return;
+      const active = (d.lines || []).filter((l) => Number(l.quantite_demandee) > 0);
+      const line = matchRequestLineByArticle(active, article);
+      if (!line) return;
+      const updated = incrementPreparedLine(line);
+      updateDetailLine(line.id, { quantite_preparee: updated.quantite_preparee });
+    },
+  });
+
+  if (view === 'form' && formMode === 'manuelle') {
+    return (
+      <SiteRequestManualFormPage
+        editId={editId}
+        form={form}
+        setForm={setForm}
+        lines={lines}
+        setLines={setLines}
+        projects={projects}
+        saving={saving}
+        error={error}
+        onBack={closeForm}
+        onSave={handleSave}
+        lockProject={embedded && !!projet?.id}
+        backLabel={embedded ? 'Retour aux besoins matériel' : 'Retour aux demandes'}
+      />
+    );
+  }
+
+  if (view === 'form') {
+    return (
+      <SiteRequestFormPage
+        editId={editId}
+        form={form}
+        setForm={setForm}
+        lines={lines}
+        setLines={setLines}
+        projects={projects}
+        stockArticles={stockArticles}
+        saving={saving}
+        error={error}
+        onBack={closeForm}
+        onSave={handleSave}
+        lockProject={embedded && !!projet?.id}
+        backLabel={embedded ? 'Retour aux besoins matériel' : 'Retour aux demandes'}
+        formTitle={embedded ? 'Nouveau besoin matériel' : undefined}
+        formSubtitle={embedded ? 'Demande transmise au magasinier — même workflow que Inventaire & Dépôt → Demandes chantier' : undefined}
+      />
+    );
+  }
+
+  return (
+    <div className={embedded ? 'inv-dc-page inv-dc-page--embedded' : 'animate-fade-in inv-dc-page'}>
+      {!embedded && (
+        <div className="page-header flex-between finance-page-header">
+          <div>
+            <h1 className="page-title">DEMANDES CHANTIER</h1>
+            <p className="page-subtitle">Demandes de matériel, consommables, équipements et EPI — remplace les fiches papier.</p>
+          </div>
+          <div className="finance-page-actions">
+            <button type="button" className="btn btn-secondary btn-sm" onClick={load} disabled={loading}>
+              <RefreshCw size={14} /> Actualiser
+            </button>
+            <button type="button" className="btn btn-primary" onClick={openCreateChooser}>
+              <Plus size={15} /> Nouvelle demande
+            </button>
+          </div>
+        </div>
+      )}
+
+      {embedded && (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12, alignItems: 'center' }}>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={load} disabled={loading} style={{ marginLeft: 'auto' }}>
+            <RefreshCw size={13} /> Actualiser
+          </button>
+          <button type="button" className="btn btn-primary btn-sm" onClick={openCreateChooser}>
+            <Plus size={13} /> Ajouter un besoin matériel
+          </button>
+        </div>
+      )}
+
+      {!embedded && (
+        <div className="stat-grid finance-kpi-grid" style={{ marginBottom: 16 }}>
+          <KpiCard icon={<ClipboardList size={17} />} label="Total demandes" value={stats.total} color="grey" />
+          <KpiCard icon={<Package size={17} />} label="Soumises" value={stats.soumises} color="blue" />
+          <KpiCard icon={<Loader2 size={17} />} label="En préparation" value={stats.preparation} color="orange" />
+          <KpiCard icon={<CheckCircle size={17} />} label="Prêtes" value={stats.pretes} color="green" />
+        </div>
+      )}
+
+      <div className="card finance-toolbar inv-dc-toolbar" style={{ marginBottom: 16, padding: '14px 20px' }}>
+        <div className="finance-toolbar-inner" style={{ flexWrap: 'wrap', gap: 10 }}>
+          <div style={{ position: 'relative', flex: '1 1 200px', maxWidth: 280 }}>
+            <Search size={14} style={{ position: 'absolute', left: 10, top: 10, color: 'var(--text-3)' }} />
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Rechercher…" style={{ ...INPUT_STYLE, paddingLeft: 32 }} />
+          </div>
+          <select value={statutFilter} onChange={(e) => setStatutFilter(e.target.value)} style={{ ...SELECT_STYLE, maxWidth: 180 }}>
+            <option value="">Tous statuts</option>
+            {SITE_REQUEST_STATUTS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+          </select>
+          <select value={prioriteFilter} onChange={(e) => setPrioriteFilter(e.target.value)} style={{ ...SELECT_STYLE, maxWidth: 140 }}>
+            <option value="">Toutes priorités</option>
+            <option value="Normale">Normale</option>
+            <option value="Urgente">Urgente</option>
+            <option value="Critique">Critique</option>
+          </select>
+        </div>
+      </div>
+
+      {error && (
+        <div className="card" style={{ marginBottom: 16, color: 'var(--red)', padding: 14, fontSize: '0.86rem' }}>{error}</div>
+      )}
+
+      {loading ? (
+        <div style={{ textAlign: 'center', padding: 40 }}><Loader2 size={24} className="spin" /></div>
+      ) : filtered.length === 0 ? (
+        <div className="card" style={{ padding: embedded ? 28 : 40, textAlign: 'center', color: 'var(--text-3)' }}>
+          {embedded
+            ? 'Aucun besoin matériel pour ce projet. Cliquez sur « Ajouter un besoin matériel ».'
+            : 'Aucune demande chantier. Créez la première demande de matériel.'}
+        </div>
+      ) : (
+        <div className="card inv-dc-list-card" style={{ padding: 0 }}>
+          <div className="table-wrap table-wrap--wide inv-dc-desktop">
+            <table>
+              <thead>
+                <tr>
+                  <th>Référence</th>
+                  {!embedded && <th>Projet</th>}
+                  <th>Client</th>
+                  <th>Nb articles</th>
+                  <th>Qté totale</th>
+                  <th>Magasinier</th>
+                  <th>Date souhaitée</th>
+                  <th>Préparation</th>
+                  <th>Livraison</th>
+                  <th>Statut</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((r) => (
+                  <tr key={r.id}>
+                    <td data-label="Référence">
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' }}>
+                        <span style={{ fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: '0.82rem', color: 'var(--red)' }}>
+                          {r.ref}
+                        </span>
+                        {isManualSiteRequest(r) && (
+                          <span className="badge badge-orange" style={{ fontSize: '0.68rem' }}>Demande manuelle</span>
+                        )}
+                      </div>
+                    </td>
+                    {!embedded && <td data-label="Projet">{r.project_name || '—'}</td>}
+                    <td data-label="Client">{r.client_name || '—'}</td>
+                    <td data-label="Nb articles">{r.distinct_articles}</td>
+                    <td data-label="Qté totale">{r.total_articles}</td>
+                    <td data-label="Magasinier">{r.prepared_by_name || '—'}</td>
+                    <td data-label="Date souhaitée">{fmtDate(r.date_souhaitee)}</td>
+                    <td data-label="Préparation">
+                      <span className={`badge ${prepBadgeClass(r.statut)}`}>
+                        {siteRequestPreparationStatut(r.statut)}
+                      </span>
+                    </td>
+                    <td data-label="Livraison">
+                      {!embedded ? (
+                        <select
+                          value={siteRequestLivraisonValue(r.statut)}
+                          onChange={(e) => handleLivraisonChange(r.id, e.target.value, r.statut)}
+                          disabled={saving || r.statut === 'annulee'}
+                          className={`badge ${livBadgeClass(r.statut)}`}
+                          style={{
+                            border: '1px solid var(--border)',
+                            borderRadius: 999,
+                            padding: '3px 8px',
+                            fontSize: '0.72rem',
+                            fontWeight: 700,
+                            background: 'transparent',
+                            cursor: saving ? 'wait' : 'pointer',
+                          }}
+                          aria-label="Livraison"
+                        >
+                          <option value="none">—</option>
+                          <option value="a_livrer">À livrer</option>
+                          <option value="livree">Livrée</option>
+                        </select>
+                      ) : (
+                        <span className={`badge ${livBadgeClass(r.statut)}`}>
+                          {siteRequestLivraisonStatut(r.statut)}
+                        </span>
+                      )}
+                    </td>
+                    <td data-label="Statut">
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start' }}>
+                        {!embedded ? (
+                          <select
+                            value={r.statut || ''}
+                            onChange={(e) => handleStatutChange(r.id, e.target.value, r.statut)}
+                            disabled={saving}
+                            style={{
+                              border: '1px solid var(--border)',
+                              borderRadius: 999,
+                              padding: '3px 10px',
+                              fontSize: '0.72rem',
+                              fontWeight: 700,
+                              background: `${siteRequestStatutColor(r.statut)}18`,
+                              color: siteRequestStatutColor(r.statut),
+                              cursor: saving ? 'wait' : 'pointer',
+                            }}
+                            aria-label="Statut"
+                          >
+                            {SITE_REQUEST_STATUTS.map((s) => (
+                              <option key={s.value} value={s.value}>{s.label}</option>
+                            ))}
+                          </select>
+                        ) : (
+                          <span className="badge" style={{ background: `${siteRequestStatutColor(r.statut)}22`, color: siteRequestStatutColor(r.statut) }}>
+                            {r.statutLabel}
+                          </span>
+                        )}
+                        {!embedded && getSiteRequestMissingLines(r).length > 0 && (
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-sm"
+                            title="Reste commande → demande d'achat"
+                            onClick={() => handleCreateDaFromMissing(r)}
+                            disabled={saving}
+                            style={{ color: '#E65100', fontSize: '0.72rem', fontWeight: 700, padding: '2px 4px' }}
+                          >
+                            <ShoppingCart size={12} /> Reste → DA
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                    <td data-label="Actions">
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, minWidth: 88 }}>
+                        {getRowActions(r, rowHandlers, { embedded }).map((action) => {
+                          const Icon = action.icon;
+                          return (
+                            <button
+                              key={action.key}
+                              type="button"
+                              className="btn btn-ghost btn-sm"
+                              title={action.label}
+                              onClick={action.onClick}
+                              disabled={saving}
+                              style={action.danger ? { color: 'var(--red)' } : undefined}
+                            >
+                              <Icon size={13} />
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="inv-dc-mobile" aria-label="Liste demandes chantier">
+            {filtered.map((r) => (
+              <article key={r.id} className="inv-dc-card">
+                <header className="inv-dc-card-head">
+                  <div className="inv-dc-card-ref">
+                    {r.ref}
+                    {isManualSiteRequest(r) && (
+                      <span className="badge badge-orange" style={{ marginLeft: 8, fontSize: '0.68rem' }}>Demande manuelle</span>
+                    )}
+                  </div>
+                  <span
+                    className="badge"
+                    style={{ background: `${siteRequestStatutColor(r.statut)}22`, color: siteRequestStatutColor(r.statut) }}
+                  >
+                    {r.statutLabel}
+                  </span>
+                </header>
+                {!embedded && (
+                  <div className="inv-dc-card-title">{r.project_name || '—'}</div>
+                )}
+                <dl className="inv-dc-card-fields">
+                  <div className="inv-dc-field">
+                    <dt>Client</dt>
+                    <dd>{r.client_name || '—'}</dd>
+                  </div>
+                  <div className="inv-dc-field-grid">
+                    <div className="inv-dc-field">
+                      <dt>Nb articles</dt>
+                      <dd>{r.distinct_articles ?? '—'}</dd>
+                    </div>
+                    <div className="inv-dc-field">
+                      <dt>Qté totale</dt>
+                      <dd>{r.total_articles ?? '—'}</dd>
+                    </div>
+                  </div>
+                  <div className="inv-dc-field">
+                    <dt>Date souhaitée</dt>
+                    <dd>{fmtDate(r.date_souhaitee)}</dd>
+                  </div>
+                  <div className="inv-dc-field-grid">
+                    <div className="inv-dc-field">
+                      <dt>Préparation</dt>
+                      <dd>
+                        <span className={`badge ${prepBadgeClass(r.statut)}`}>
+                          {siteRequestPreparationStatut(r.statut)}
+                        </span>
+                      </dd>
+                    </div>
+                    <div className="inv-dc-field">
+                      <dt>Livraison</dt>
+                      <dd>
+                        {!embedded ? (
+                          <select
+                            value={siteRequestLivraisonValue(r.statut)}
+                            onChange={(e) => handleLivraisonChange(r.id, e.target.value, r.statut)}
+                            disabled={saving || r.statut === 'annulee'}
+                            style={{ ...SELECT_STYLE, fontSize: '0.8rem', fontWeight: 700 }}
+                          >
+                            <option value="none">—</option>
+                            <option value="a_livrer">À livrer</option>
+                            <option value="livree">Livrée</option>
+                          </select>
+                        ) : (
+                          <span className={`badge ${livBadgeClass(r.statut)}`}>
+                            {siteRequestLivraisonStatut(r.statut)}
+                          </span>
+                        )}
+                      </dd>
+                    </div>
+                  </div>
+                  {!embedded && (
+                    <div className="inv-dc-field">
+                      <dt>Statut</dt>
+                      <dd>
+                        <select
+                          value={r.statut || ''}
+                          onChange={(e) => handleStatutChange(r.id, e.target.value, r.statut)}
+                          disabled={saving}
+                          style={{ ...SELECT_STYLE, fontSize: '0.8rem', fontWeight: 700, color: siteRequestStatutColor(r.statut) }}
+                        >
+                          {SITE_REQUEST_STATUTS.map((s) => (
+                            <option key={s.value} value={s.value}>{s.label}</option>
+                          ))}
+                        </select>
+                      </dd>
+                    </div>
+                  )}
+                  {!embedded && getSiteRequestMissingLines(r).length > 0 && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      style={{ marginTop: 8, width: '100%', justifyContent: 'center' }}
+                      disabled={saving}
+                      onClick={() => handleCreateDaFromMissing(r)}
+                    >
+                      <ShoppingCart size={14} /> Reste commande → demande d&apos;achat
+                    </button>
+                  )}
+                </dl>
+                <footer className="inv-dc-card-actions">
+                  {getRowActions(r, rowHandlers, { embedded }).map((action) => {
+                    const Icon = action.icon;
+                    return (
+                      <button
+                        key={action.key}
+                        type="button"
+                        className={`btn btn-ghost btn-sm inv-dc-action${action.danger ? ' inv-dc-action--danger' : ''}`}
+                        onClick={action.onClick}
+                        disabled={saving}
+                        style={action.danger ? { color: 'var(--red)' } : undefined}
+                      >
+                        <Icon size={14} /> {action.label}
+                      </button>
+                    );
+                  })}
+                </footer>
+              </article>
+            ))}
+          </div>
+        </div>
+      )}
+
+
+      {detail && (
+        <>
+          <div className="rh-emp-docs-drawer-overlay" onClick={closeDetail} aria-hidden="true" />
+          <aside className="rh-emp-docs-drawer inv-dc-drawer" style={{ maxWidth: 920, width: 'min(96vw, 920px)' }} role="dialog">
+            <header className="rh-emp-docs-drawer-header inv-dc-drawer-header">
+              <div className="inv-dc-drawer-head-top">
+                <div className="inv-dc-drawer-head-text">
+                  <div className="inv-dc-drawer-ref">
+                    {detail.ref}
+                    {isManualSiteRequest(detail) && (
+                      <span className="badge badge-orange" style={{ marginLeft: 8, fontSize: '0.72rem' }}>Demande manuelle</span>
+                    )}
+                  </div>
+                  <h2 className="rh-emp-docs-drawer-title">DEMANDE — {detail.project_name}</h2>
+                </div>
+                <button type="button" className="rh-emp-modal-close inv-dc-drawer-close" onClick={closeDetail} aria-label="Fermer">
+                  <X size={20} />
+                </button>
+              </div>
+            </header>
+            <div className="rh-emp-docs-drawer-body">
+              {/* Récap demande — toujours visible, modifiable */}
+              <div
+                className="inv-dc-recap"
+                style={{
+                  marginBottom: 16,
+                  padding: '14px 16px',
+                  background: 'var(--surface-2, #F5F5F5)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 10,
+                }}
+              >
+                <div style={{
+                  fontSize: '0.7rem', fontWeight: 800, color: 'var(--text-3)',
+                  textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 12,
+                }}
+                >
+                  Récapitulatif de la demande
+                </div>
+                <div className="rh-emp-docs-info-grid inv-dc-info-grid" style={{ marginBottom: 0 }}>
+                  <div>
+                    <div className="rh-emp-docs-info-label">Projet</div>
+                    <div className="rh-emp-docs-info-value">{detail.project_name || '—'}</div>
+                  </div>
+                  <div>
+                    <div className="rh-emp-docs-info-label">Client</div>
+                    {!embedded && detail.statut !== 'annulee' ? (
+                      <input
+                        value={detailRecap?.client_name || ''}
+                        onChange={(e) => setRecapField('client_name', e.target.value)}
+                        style={{ ...INPUT_STYLE, marginTop: 4 }}
+                        disabled={saving}
+                      />
+                    ) : (
+                      <div className="rh-emp-docs-info-value">{detail.client_name || '—'}</div>
+                    )}
+                  </div>
+                  <div>
+                    <div className="rh-emp-docs-info-label">Chef chantier</div>
+                    {!embedded && detail.statut !== 'annulee' ? (
+                      <input
+                        value={detailRecap?.chef_chantier || ''}
+                        onChange={(e) => setRecapField('chef_chantier', e.target.value)}
+                        style={{ ...INPUT_STYLE, marginTop: 4 }}
+                        disabled={saving}
+                      />
+                    ) : (
+                      <div className="rh-emp-docs-info-value">{detail.chef_chantier || '—'}</div>
+                    )}
+                  </div>
+                  <div>
+                    <div className="rh-emp-docs-info-label">Chef projet</div>
+                    {!embedded && detail.statut !== 'annulee' ? (
+                      <input
+                        value={detailRecap?.chef_projet || ''}
+                        onChange={(e) => setRecapField('chef_projet', e.target.value)}
+                        style={{ ...INPUT_STYLE, marginTop: 4 }}
+                        disabled={saving}
+                      />
+                    ) : (
+                      <div className="rh-emp-docs-info-value">{detail.chef_projet || '—'}</div>
+                    )}
+                  </div>
+                  <div>
+                    <div className="rh-emp-docs-info-label">Priorité</div>
+                    {!embedded && detail.statut !== 'annulee' ? (
+                      <select
+                        value={detailRecap?.priorite || 'Normale'}
+                        onChange={(e) => setRecapField('priorite', e.target.value)}
+                        style={{ ...SELECT_STYLE, marginTop: 4, fontWeight: 700 }}
+                        disabled={saving}
+                      >
+                        {SITE_REQUEST_PRIORITES.map((p) => (
+                          <option key={p} value={p}>{p}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <div className="rh-emp-docs-info-value">{detail.priorite || '—'}</div>
+                    )}
+                  </div>
+                  <div>
+                    <div className="rh-emp-docs-info-label">Date souhaitée</div>
+                    {!embedded && detail.statut !== 'annulee' ? (
+                      <input
+                        type="date"
+                        value={detailRecap?.date_souhaitee || ''}
+                        onChange={(e) => setRecapField('date_souhaitee', e.target.value)}
+                        style={{ ...INPUT_STYLE, marginTop: 4 }}
+                        disabled={saving}
+                      />
+                    ) : (
+                      <div className="rh-emp-docs-info-value">{fmtDate(detail.date_souhaitee)}</div>
+                    )}
+                  </div>
+                  <div>
+                    <div className="rh-emp-docs-info-label">Statut</div>
+                    {!embedded ? (
+                      <select
+                        value={detail.statut || ''}
+                        onChange={(e) => handleStatutChange(detail.id, e.target.value, detail.statut)}
+                        disabled={saving}
+                        style={{ ...SELECT_STYLE, marginTop: 4, fontWeight: 700, color: siteRequestStatutColor(detail.statut) }}
+                      >
+                        {SITE_REQUEST_STATUTS.map((s) => (
+                          <option key={s.value} value={s.value}>{s.label}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <div className="rh-emp-docs-info-value">{detail.statutLabel}</div>
+                    )}
+                  </div>
+                  {!embedded && (
+                    <div>
+                      <div className="rh-emp-docs-info-label">Livraison</div>
+                      <select
+                        value={siteRequestLivraisonValue(detail.statut)}
+                        onChange={(e) => handleLivraisonChange(detail.id, e.target.value, detail.statut)}
+                        disabled={saving || detail.statut === 'annulee'}
+                        style={{ ...SELECT_STYLE, marginTop: 4, fontWeight: 700 }}
+                      >
+                        <option value="none">—</option>
+                        <option value="a_livrer">À livrer</option>
+                        <option value="livree">Livrée</option>
+                      </select>
+                    </div>
+                  )}
+                </div>
+                <div style={{ marginTop: 12 }}>
+                  <div className="rh-emp-docs-info-label">Observation</div>
+                  {!embedded && detail.statut !== 'annulee' ? (
+                    <textarea
+                      rows={2}
+                      value={detailRecap?.observation || ''}
+                      onChange={(e) => setRecapField('observation', e.target.value)}
+                      style={{ ...INPUT_STYLE, marginTop: 4, resize: 'vertical', width: '100%' }}
+                      disabled={saving}
+                      placeholder="Notes / observation…"
+                    />
+                  ) : (
+                    <div className="rh-emp-docs-info-value" style={{ marginTop: 4 }}>
+                      {detail.observation || '—'}
+                    </div>
+                  )}
+                </div>
+                {!embedded && detail.statut !== 'annulee' && (
+                  <div style={{ marginTop: 12, display: 'flex', justifyContent: 'flex-end' }}>
+                    <button
+                      type="button"
+                      className="btn btn-primary btn-sm"
+                      disabled={saving}
+                      onClick={handleSaveDetailRecap}
+                    >
+                      Enregistrer le récap
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {!embedded && missingLines.length > 0 && (
+                <div
+                  style={{
+                    marginBottom: 16,
+                    padding: '14px 16px',
+                    border: '1.5px solid #FFCC80',
+                    borderRadius: 10,
+                    background: '#FFF8E1',
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+                    <div>
+                      <div style={{ fontWeight: 800, fontSize: '0.88rem', marginBottom: 4, color: '#E65100' }}>
+                        Reste de commande — à acheter
+                      </div>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--text-2)' }}>
+                        {missingLines.length} article{missingLines.length > 1 ? 's' : ''} · {missingQtyTotal} unité(s) manquante(s)
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-primary btn-sm"
+                      disabled={saving}
+                      onClick={() => handleCreateDaFromMissing(detail)}
+                    >
+                      <ShoppingCart size={14} />
+                      {linkedDa ? 'Mettre à jour / ouvrir DA' : 'Passer en demande d\'achat'}
+                    </button>
+                  </div>
+                  {linkedDa && (
+                    <div style={{ marginTop: 8, fontSize: '0.8rem', color: '#1565C0' }}>
+                      DA liée : <strong>{linkedDa.ref || linkedDa.ref_demande || linkedDa.titre}</strong>
+                      {' · '}
+                      {linkedDa.statutLabel || linkedDa.statut}
+                    </div>
+                  )}
+                  <div className="table-wrap" style={{ marginTop: 12 }}>
+                    <table style={{ fontSize: '0.8rem', width: '100%' }}>
+                      <thead>
+                        <tr>
+                          <th>Article</th>
+                          <th>Demandé</th>
+                          <th>Préparé</th>
+                          <th>Manquant</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {missingLines.map((l) => (
+                          <tr key={l.id || `${l.category_id}-${l.article_name}`}>
+                            <td>
+                              {l.article_name}
+                              {l.rupture ? <span className="badge badge-red" style={{ marginLeft: 6, fontSize: '0.65rem' }}>Rupture</span> : null}
+                            </td>
+                            <td>{l.quantite_demandee} {l.unite || 'u'}</td>
+                            <td>{l.quantite_preparee || 0}</td>
+                            <td style={{ fontWeight: 800, color: 'var(--red)' }}>{l.quantite_manquante} {l.unite || 'u'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {!embedded && missingLines.length === 0 && linkedDa && (
+                <div style={{ marginBottom: 16, fontSize: '0.84rem', color: '#1565C0' }}>
+                  Demande d&apos;achat liée : <strong>{linkedDa.ref || linkedDa.ref_demande || linkedDa.titre}</strong>
+                  {' '}
+                  <button type="button" className="btn btn-ghost btn-sm" onClick={() => onNavigate?.('demandes-achat')}>
+                    Voir Achats
+                  </button>
+                </div>
+              )}
+
+              {/* Articles — toujours visibles (lecture seule si prête / livrée / annulée) */}
+              {(detail.lines || []).filter((l) => Number(l.quantite_demandee) > 0).length > 0 && (
+                <>
+                  {canScanPreparation && (
+                    <ArticleScanBar
+                      onScan={handlePrepScan}
+                      loading={prepScanning}
+                      error={prepScanError}
+                      success={prepScanSuccess}
+                      label="Scanner un article à préparer"
+                      placeholder="Scannez chaque article préparé…"
+                      compact
+                    />
+                  )}
+                <div className="table-wrap inv-dc-lines-desktop" style={{ marginBottom: 16 }}>
+                  <table style={{ fontSize: '0.82rem' }}>
+                    <thead>
+                      <tr>
+                        <th>Article</th>
+                        <th>Demandé</th>
+                        <th>Disponibilité</th>
+                        <th>Préparé</th>
+                        <th>À acheter</th>
+                        <th>Stock</th>
+                        {!embedded && <th>Associer / Remarque</th>}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(detail.lines || []).filter((l) => Number(l.quantite_demandee) > 0).map((l) => {
+                        const prepared = isLineFullyPrepared(l);
+                        const avail = lineAvailabilityStatus(l);
+                        const locked = !['soumise', 'en_preparation', 'preparation_partielle', 'en_attente_dg', 'validee_dg'].includes(detail.statut);
+                        return (
+                        <tr key={l.id || `${l.category_id}-${l.article_name}`} style={prepared ? { background: '#F1F8E9' } : undefined}>
+                          <td>
+                            {prepared && <span style={{ color: '#2E7D32', marginRight: 6 }} title="Préparée">✓</span>}
+                            {l.article_name}
+                            {l.is_custom && !l.article_id && (
+                              <span className="badge badge-orange" style={{ marginLeft: 6, fontSize: '0.65rem' }}>Hors catalogue</span>
+                            )}
+                          </td>
+                          <td>{l.quantite_demandee} {l.unite || 'u'}</td>
+                          <td>
+                            {embedded ? (
+                              avail === 'ok' ? 'Disponible' : avail === 'partial' ? 'Partiel' : 'Non disponible'
+                            ) : (
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                                <button type="button" className="btn btn-ghost btn-sm" disabled={locked} title="Disponible"
+                                  style={{ padding: '2px 6px', background: avail === 'ok' ? '#E8F5E9' : undefined }}
+                                  onClick={() => setLineAvailability(l, 'ok')}>✅</button>
+                                <button type="button" className="btn btn-ghost btn-sm" disabled={locked} title="Partiellement"
+                                  style={{ padding: '2px 6px', background: avail === 'partial' ? '#FFF8E1' : undefined }}
+                                  onClick={() => setLineAvailability(l, 'partial')}>🟡</button>
+                                <button type="button" className="btn btn-ghost btn-sm" disabled={locked} title="Non disponible"
+                                  style={{ padding: '2px 6px', background: avail === 'none' ? '#FFEBEE' : undefined }}
+                                  onClick={() => setLineAvailability(l, 'none')}>❌</button>
+                              </div>
+                            )}
+                          </td>
+                          <td>
+                            {embedded ? (
+                              l.quantite_preparee ?? '—'
+                            ) : (
+                              <input
+                                type="number"
+                                min="0"
+                                value={l.quantite_preparee ?? ''}
+                                onChange={(e) => {
+                                  const prep = Number(e.target.value) || 0;
+                                  const demandee = Number(l.quantite_demandee) || 0;
+                                  updateDetailLine(l.id, {
+                                    quantite_preparee: prep,
+                                    disponible: prep >= demandee,
+                                    rupture: prep <= 0,
+                                  });
+                                }}
+                                style={{ ...INPUT_STYLE, padding: '4px 8px', width: 70 }}
+                                disabled={locked}
+                              />
+                            )}
+                          </td>
+                          <td style={{ fontWeight: 700, color: qtyToBuy(l) > 0 ? 'var(--red)' : 'var(--text-2)' }}>
+                            {qtyToBuy(l)}
+                          </td>
+                          <td>{l.stock_actuel ?? '—'}</td>
+                          {!embedded && (
+                            <td>
+                              <select
+                                value={l.article_id || ''}
+                                onChange={(e) => associateLineToArticle(l, e.target.value)}
+                                style={{ ...SELECT_STYLE, padding: '4px 8px', marginBottom: 6, fontSize: '0.78rem' }}
+                                disabled={locked}
+                              >
+                                <option value="">Associer au catalogue…</option>
+                                {stockArticles.map((a) => (
+                                  <option key={a.id} value={a.id}>{a.nom || a.designation}</option>
+                                ))}
+                              </select>
+                              <input
+                                value={l.remarque_magasinier || ''}
+                                onChange={(e) => updateDetailLine(l.id, { remarque_magasinier: e.target.value })}
+                                style={{ ...INPUT_STYLE, padding: '4px 8px' }}
+                                placeholder="Remarque magasin"
+                                disabled={locked}
+                              />
+                            </td>
+                          )}
+                        </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="inv-dc-lines-mobile" style={{ marginBottom: 16 }}>
+                  {(detail.lines || []).filter((l) => Number(l.quantite_demandee) > 0).map((l) => {
+                    const prepared = isLineFullyPrepared(l);
+                    const avail = lineAvailabilityStatus(l);
+                    const locked = !['soumise', 'en_preparation', 'preparation_partielle', 'en_attente_dg', 'validee_dg'].includes(detail.statut);
+                    return (
+                      <div
+                        key={l.id || `m-${l.category_id}-${l.article_name}`}
+                        className={`inv-dc-line-card${prepared ? ' is-prepared' : ''}`}
+                      >
+                        <div className="inv-dc-line-name">
+                          {prepared && <span className="inv-dc-line-ok" title="Préparée">✓</span>}
+                          {l.article_name}
+                          {l.is_custom && !l.article_id && (
+                            <span className="badge badge-orange" style={{ marginLeft: 6, fontSize: '0.65rem' }}>Hors catalogue</span>
+                          )}
+                        </div>
+                        <dl className="inv-dc-line-metrics">
+                          <div className="inv-dc-field">
+                            <dt>Demandé</dt>
+                            <dd>{l.quantite_demandee}</dd>
+                          </div>
+                          <div className="inv-dc-field">
+                            <dt>Préparé</dt>
+                            <dd>
+                              {embedded ? (
+                                l.quantite_preparee ?? '—'
+                              ) : (
+                                <input
+                                  type="number"
+                                  min="0"
+                                  value={l.quantite_preparee ?? ''}
+                                  onChange={(e) => {
+                                    const prep = Number(e.target.value) || 0;
+                                    const demandee = Number(l.quantite_demandee) || 0;
+                                    updateDetailLine(l.id, {
+                                      quantite_preparee: prep,
+                                      disponible: prep >= demandee,
+                                      rupture: prep <= 0,
+                                    });
+                                  }}
+                                  className="inv-dc-line-input"
+                                  style={INPUT_STYLE}
+                                  disabled={locked}
+                                />
+                              )}
+                            </dd>
+                          </div>
+                          <div className="inv-dc-field">
+                            <dt>À acheter</dt>
+                            <dd style={{ fontWeight: 700, color: qtyToBuy(l) > 0 ? 'var(--red)' : undefined }}>{qtyToBuy(l)}</dd>
+                          </div>
+                          <div className="inv-dc-field">
+                            <dt>Stock</dt>
+                            <dd>{l.stock_actuel ?? '—'}</dd>
+                          </div>
+                        </dl>
+                        {!embedded && (
+                          <>
+                            <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+                              <button type="button" className="btn btn-ghost btn-sm" disabled={locked}
+                                style={{ background: avail === 'ok' ? '#E8F5E9' : undefined }}
+                                onClick={() => setLineAvailability(l, 'ok')}>✅ Disponible</button>
+                              <button type="button" className="btn btn-ghost btn-sm" disabled={locked}
+                                style={{ background: avail === 'partial' ? '#FFF8E1' : undefined }}
+                                onClick={() => setLineAvailability(l, 'partial')}>🟡 Partiel</button>
+                              <button type="button" className="btn btn-ghost btn-sm" disabled={locked}
+                                style={{ background: avail === 'none' ? '#FFEBEE' : undefined }}
+                                onClick={() => setLineAvailability(l, 'none')}>❌ Non dispo</button>
+                            </div>
+                            <dl className="inv-dc-field" style={{ marginTop: 8 }}>
+                              <dt>Associer au catalogue</dt>
+                              <dd>
+                                <select
+                                  value={l.article_id || ''}
+                                  onChange={(e) => associateLineToArticle(l, e.target.value)}
+                                  className="inv-dc-line-input inv-dc-line-input--full"
+                                  style={SELECT_STYLE}
+                                  disabled={locked}
+                                >
+                                  <option value="">— Choisir un article —</option>
+                                  {stockArticles.map((a) => (
+                                    <option key={a.id} value={a.id}>{a.nom || a.designation}</option>
+                                  ))}
+                                </select>
+                              </dd>
+                            </dl>
+                            <dl className="inv-dc-field" style={{ marginTop: 8 }}>
+                              <dt>Remarque magasin</dt>
+                              <dd>
+                                <input
+                                  value={l.remarque_magasinier || ''}
+                                  onChange={(e) => updateDetailLine(l.id, { remarque_magasinier: e.target.value })}
+                                  className="inv-dc-line-input inv-dc-line-input--full"
+                                  style={INPUT_STYLE}
+                                  disabled={locked}
+                                />
+                              </dd>
+                            </dl>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                </>
+              )}
+
+              {detail.movement_ref && (
+                <div style={{ marginBottom: 16, fontSize: '0.86rem', color: '#1565C0' }}>
+                  Bon de sortie : <strong>{detail.movement_ref}</strong>
+                </div>
+              )}
+
+              <div className="inv-dc-detail-actions" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 20 }}>
+                <button type="button" className="btn btn-secondary btn-sm" onClick={() => handlePdf(detail.id)}><Download size={14} /> Télécharger PDF</button>
+                {!embedded && detail.statut === 'soumise' && (
+                  <button type="button" className="btn btn-primary btn-sm" disabled={saving} onClick={() => runAction((id) => prepareSiteMaterialRequest(id, detail.lines))}>
+                    <Package size={14} /> Prendre en charge
+                  </button>
+                )}
+                {!embedded && ['en_preparation', 'preparation_partielle'].includes(detail.statut) && (
+                  <>
+                    <button type="button" className="btn btn-secondary btn-sm" disabled={saving} onClick={() => runAction((id) => prepareSiteMaterialRequest(id, detail.lines, { partial: true }))}>Préparation partielle</button>
+                    {detail.requires_dg ? (
+                      <button type="button" className="btn btn-secondary btn-sm" disabled={saving} onClick={() => runAction(requestDgValidation)}>Demander validation DG</button>
+                    ) : (
+                      <button type="button" className="btn btn-primary btn-sm" disabled={saving} onClick={() => runAction((id) => prepareSiteMaterialRequest(id, detail.lines).then(() => markSiteRequestReady(id)))}>
+                        <CheckCircle size={14} /> Valider préparation
+                      </button>
+                    )}
+                  </>
+                )}
+                {!embedded && detail.statut === 'en_attente_dg' && (
+                  <button type="button" className="btn btn-primary btn-sm" disabled={saving} onClick={() => runAction((id) => validateSiteRequestDg(id).then(() => markSiteRequestReady(id)))}>
+                    Valider DG
+                  </button>
+                )}
+                {!embedded && ['prete', 'validee_dg'].includes(detail.statut) && (
+                  <button type="button" className="btn btn-primary btn-sm" disabled={saving} onClick={() => runAction(async (id) => {
+                    await prepareSiteMaterialRequest(id, detail.lines);
+                    return deliverSiteMaterialRequest(id);
+                  })}
+                  >
+                    <Truck size={14} /> Livrer & générer bon de sortie
+                  </button>
+                )}
+                {!embedded && !['livree', 'annulee'].includes(detail.statut) && (
+                  <button type="button" className="btn btn-ghost btn-sm" style={{ color: 'var(--red)' }} disabled={saving} onClick={() => {
+                    const reason = window.prompt('Motif d\'annulation :');
+                    if (reason) runAction((id) => cancelSiteMaterialRequest(id, reason));
+                  }}
+                  >
+                    Annuler
+                  </button>
+                )}
+              </div>
+
+              {detail.history?.length > 0 && (
+                <section>
+                  <h3 style={{ fontSize: '0.9rem', fontWeight: 700, marginBottom: 10 }}>Historique</h3>
+                  <ul style={{ listStyle: 'none', padding: 0, margin: 0, fontSize: '0.82rem' }}>
+                    {detail.history.map((h) => (
+                      <li key={h.id} style={{ padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
+                        <strong>{h.action}</strong> — {h.actor_name || 'Système'} — {fmtDateTime(h.created_at)}
+                        {h.details && <div style={{ color: 'var(--text-3)', marginTop: 2 }}>{h.details}</div>}
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
+            </div>
+          </aside>
+        </>
+      )}
+
+      <SiteRequestCreateModeModal
+        open={showCreateMode}
+        onClose={() => setShowCreateMode(false)}
+        onSelectCatalogue={openCreateCatalogue}
+        onSelectManual={openCreateManual}
+      />
+    </div>
+  );
+}

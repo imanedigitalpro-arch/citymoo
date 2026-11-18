@@ -1,0 +1,2520 @@
+import {
+  HardHat, Plus, Edit2, Trash2, Eye, Download, Search, X,
+  Upload, Camera, ScanLine, User, FileText, Shield,
+  Phone, MapPin, CheckCircle, Clock, AlertCircle,
+  ChevronLeft, RefreshCw, ArrowUpDown, Package,
+  Loader, Star
+} from 'lucide-react';
+
+import { useState, useEffect, useRef, useCallback, useId } from 'react';
+import { createPortal } from 'react-dom';
+import { useWorkers } from '../hooks/useWorkers';
+import {
+  scanCIN,
+  assessClientQuality,
+  syncOcrLearning,
+  canUseCamera,
+  getCameraBlockedReason,
+  getCameraErrorMessage,
+  getCINCameraStream,
+  preloadOcrEngine,
+  pickFillableFields,
+  isRealFieldConflict,
+  getReadableMessage,
+} from '../services/ocr';
+import { captureCINFromVideo, prepareImportedCINImage, dataUrlToCaptureFile } from '../services/cinCapture';
+import CINManualCropModal from './cin/CINManualCropModal';
+import CINGuidedCamera from './cin/CINGuidedCamera';
+import { generateWorkerPdf } from '../services/rh/workerPdf';
+import { workerTarifJournalier } from '../services/rh/workers';
+
+/* Exported for compatibility — starts empty, populated from API */
+export const SEED_WORKERS = [];
+
+/* ── Constants ── */
+const FONCTIONS   = ['Macon', 'Coffreur', 'Ferrailleur', 'Electricien', 'Peintre', 'Plombier', 'Carreleur', 'Menuisier', 'Soudeur', 'Chauffeur', 'Manoeuvre', 'Chef equipe', 'Conducteur engins', 'Topographe', 'Gardien'];
+const GROUPES     = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
+const TAILLES_VET = ['XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL'];
+const POINTURES   = ['38', '39', '40', '41', '42', '43', '44', '45', '46'];
+
+const STATUT_CFG = {
+  actif:        { label: 'Actif',        cls: 'badge-green'  },
+  en_chantier:  { label: 'En chantier',  cls: 'badge-blue'   },
+  disponible:   { label: 'Disponible',   cls: 'badge-orange' },
+  suspendu:     { label: 'Suspendu',     cls: 'badge-red'    },
+  archive:      { label: 'Archive',      cls: 'badge-grey'   },
+};
+
+/** CIN marocaine ID-1 : 85.60 mm × 53.98 mm */
+const CIN_HINT = 'Placez toute la carte dans le cadre';
+const SCANNER_PLACE_HINT = 'Placez toute la carte dans le cadre';
+/** Identifiant build — vérifier dans la console Safari mobile que cette version est chargée */
+const CIN_SCANNER_VERSION = '2026-07-29-cin-contain-frame';
+
+const EMPTY_FORM = {
+  prenom: '', nom: '', telephone: '', cin: '', fonction: '', tarif: '', tarif_unite: 'jour',
+  date_naissance: '', ville_naissance: '', adresse: '', nationalite: 'Marocaine', etat_civil: '', groupe_sanguin: '',
+  sexe: '', date_expiration: '', autorite: '',
+  experience: '3', date_recrutement: '', statut: 'actif', disponibilite: 'oui',
+  project_id: '', projet_nom: '', chantier: '', chantier_legacy: '',
+  contact_urgence: '', tel_urgence: '', relation_urgence: '',
+  pointure: '', taille_vetement: '', taille_gants: '', casque: '', badge: '',
+  photo: '', cin_recto: '', cin_verso: '',
+};
+
+/* ── Helpers ── */
+function fmtTarifJour(n) { return Number(n).toLocaleString('fr-MA', { minimumFractionDigits: 0, maximumFractionDigits: 2 }) + ' MAD/j'; }
+function fmtDate(d) { if (!d) return '—'; try { return new Date(d).toLocaleDateString('fr-MA', { day: '2-digit', month: '2-digit', year: 'numeric' }); } catch { return d; } }
+function initials(w) { return ((w.prenom?.[0] || '') + (w.nom?.[0] || '')).toUpperCase() || '?'; }
+
+/** Niveau d'expérience : 1–5 (rétrocompat debutant…expert) */
+function experienceToStars(exp) {
+  const n = Number(exp);
+  if (n >= 1 && n <= 5) return n;
+  const map = { debutant: 1, intermediaire: 2, confirme: 3, expert: 4 };
+  return map[exp] || 3;
+}
+
+function formatExperienceStars(exp) {
+  const n = experienceToStars(exp);
+  return `${'★'.repeat(n)}${'☆'.repeat(5 - n)} (${n}/5)`;
+}
+
+function formFromWorker(worker) {
+  if (!worker) return { ...EMPTY_FORM };
+  const daily = workerTarifJournalier(worker);
+  return {
+    ...EMPTY_FORM,
+    ...worker,
+    tarif: daily ? String(daily) : '',
+    tarif_unite: 'jour',
+    experience: String(experienceToStars(worker.experience)),
+  };
+}
+/* ── Input style ── */
+function IS(err, extra = {}) {
+  return {
+    padding: '8px 11px', border: '1.5px solid ' + (err ? 'var(--red)' : 'var(--border)'),
+    borderRadius: 6, fontSize: '0.86rem', background: '#fff', outline: 'none',
+    width: '100%', boxSizing: 'border-box', fontFamily: 'var(--font-body)',
+    color: 'var(--text)', transition: 'border-color 0.15s', ...extra,
+  };
+}
+function Label({ children, required }) {
+  return (
+    <label style={{ fontSize: '0.7rem', fontWeight: 800, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.08em', display: 'block', marginBottom: 5 }}>
+      {children}{required && <span style={{ color: 'var(--red)', marginLeft: 2 }}>*</span>}
+    </label>
+  );
+}
+
+function OcrConfBadge({ meta }) {
+  if (!meta) return null;
+  const level = meta.confidence_level || meta.confidence;
+  if (!level || level === 'non_detecte') return null;
+  const norm = level === 'elevee' || level === 'élevée' ? 'haute' : level;
+  const label = norm === 'haute'
+    ? 'Confiance haute'
+    : norm === 'moyenne'
+      ? 'À vérifier'
+      : 'À vérifier';
+  const pct = meta.confidence_from_vision && meta.confidence_pct
+    ? ` ${meta.confidence_pct}%`
+    : '';
+  return (
+    <span className={'cin-conf-inline cin-conf--' + norm}>
+      {label}{pct}
+    </span>
+  );
+}
+
+/** Cadre preview CIN — ratio officiel 85.60 / 53.98 mm */
+function CINFrame({ children, hasImage, hint = CIN_HINT, className = '', detected = false, needsCheck = false }) {
+  return (
+    <div
+      className={
+        'cin-id-frame'
+        + (hasImage ? ' has-img' : '')
+        + (detected ? ' cin-id-frame--detected' : '')
+        + (needsCheck ? ' cin-id-frame--check' : '')
+        + (className ? ' ' + className : '')
+      }
+    >
+      {!hasImage && (
+        <div className="cin-id-frame-guide" aria-hidden="true">
+          <span className="cin-id-frame-guide-corner cin-id-frame-guide-corner--tl" />
+          <span className="cin-id-frame-guide-corner cin-id-frame-guide-corner--tr" />
+          <span className="cin-id-frame-guide-corner cin-id-frame-guide-corner--bl" />
+          <span className="cin-id-frame-guide-corner cin-id-frame-guide-corner--br" />
+        </div>
+      )}
+      {children}
+      {hint && !hasImage && <div className="cin-id-frame-hint">{hint}</div>}
+      {detected && hasImage && (
+        <div className="cin-id-frame-detected-badge">
+          <CheckCircle size={12} /> Carte correctement détectée
+        </div>
+      )}
+      {needsCheck && hasImage && !detected && (
+        <div className="cin-id-frame-check-badge">
+          <AlertCircle size={12} /> Cadrage à vérifier
+        </div>
+      )}
+    </div>
+  );
+}
+function STitle({ children }) {
+  return (
+    <div style={{ fontSize: '0.7rem', fontWeight: 800, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 14, paddingBottom: 8, borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 7 }}>
+      {children}
+    </div>
+  );
+}
+
+/* ── Toast ── */
+function Toast({ toast }) {
+  if (!toast) return null;
+  const msg = getReadableMessage(toast.msg ?? toast.message ?? toast, 'Notification');
+  return (
+    <div style={{ position: 'fixed', bottom: 28, right: 28, zIndex: 9999, background: toast.type === 'error' ? '#D32F2F' : '#1B5E20', color: '#fff', borderRadius: 10, padding: '13px 20px', fontSize: '0.875rem', fontWeight: 600, boxShadow: '0 4px 24px rgba(0,0,0,0.18)', display: 'flex', alignItems: 'center', gap: 10, maxWidth: 380, animation: 'fadeIn 0.2s ease' }}>
+      {toast.type === 'error' ? <AlertCircle size={16} /> : <CheckCircle size={16} />}
+      {msg}
+    </div>
+  );
+}
+
+/* ── Avatar ── */
+function Avatar({ worker, size = 36 }) {
+  if (worker.photo) {
+    return <img src={worker.photo} alt={worker.prenom} style={{ width: size, height: size, borderRadius: '50%', objectFit: 'cover', border: '2px solid var(--border)', flexShrink: 0 }} />;
+  }
+  return (
+    <div style={{ width: size, height: size, borderRadius: '50%', background: 'var(--red)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'var(--font-head)', fontWeight: 800, fontSize: size > 48 ? '1.3rem' : '0.8rem', flexShrink: 0 }}>
+      {initials(worker)}
+    </div>
+  );
+}
+
+/* ── Photo Upload Block ── */
+function PhotoUpload({ value, onChange, label }) {
+  const inputRef = useRef(null);
+
+  function handleFile(file) {
+    if (!file || !file.type.startsWith('image/')) return;
+    const reader = new FileReader();
+    reader.onload = e => onChange(e.target.result);
+    reader.readAsDataURL(file);
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
+      <div
+        onClick={() => inputRef.current?.click()}
+        onDragOver={e => e.preventDefault()}
+        onDrop={e => { e.preventDefault(); handleFile(e.dataTransfer.files[0]); }}
+        style={{ width: 100, height: 100, borderRadius: '50%', border: '2px dashed ' + (value ? 'var(--red)' : 'var(--border)'), cursor: 'pointer', overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg)', transition: 'border-color 0.15s', flexShrink: 0 }}
+      >
+        {value
+          ? <img src={value} alt="photo" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+          : <div style={{ textAlign: 'center', color: 'var(--text-3)' }}><Camera size={22} /><div style={{ fontSize: '0.7rem', marginTop: 4 }}>{label}</div></div>
+        }
+      </div>
+      <div style={{ display: 'flex', gap: 6 }}>
+        <button type="button" onClick={() => inputRef.current?.click()} className="btn btn-ghost btn-sm" style={{ fontSize: '0.72rem', display: 'flex', alignItems: 'center', gap: 4 }}>
+          <Upload size={11} /> Upload
+        </button>
+        {value && <button type="button" onClick={() => onChange('')} className="btn btn-ghost btn-sm" style={{ fontSize: '0.72rem', color: 'var(--red)' }}><X size={11} /></button>}
+      </div>
+      <input ref={inputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={e => handleFile(e.target.files?.[0])} />
+    </div>
+  );
+}
+
+/* ── Zone Documents CIN — caméra guidée Citymo (cadre ID-1) + galerie en fallback ── */
+function CINDocZone({
+  side,
+  value,
+  onChange,
+  quality,
+  cropHint,
+  detected = false,
+  originalDataUrl = '',
+  onUseOriginal,
+  onOpenManualCrop,
+  onOpenCamera,
+}) {
+  const inputRef = useRef(null);
+  const [dragOver, setDragOver] = useState(false);
+  const isRecto = side === 'recto';
+  const title = isRecto ? 'CIN recto' : 'CIN verso';
+  const needsCheck = Boolean(value) && Boolean(cropHint);
+  const qLabel = quality?.label;
+
+  function isImageFile(file) {
+    if (!file) return false;
+    const type = (file.type || '').toLowerCase();
+    const name = (file.name || '').toLowerCase();
+    if (type === 'application/pdf') return false;
+    return type.startsWith('image/') || /\.(jpe?g|png|webp)$/i.test(name);
+  }
+
+  function handleFile(file) {
+    if (!file || !isImageFile(file)) return;
+    const reader = new FileReader();
+    reader.onload = (e) => onChange(e.target.result, file);
+    reader.onerror = () => console.error('[OCR CIN] lecture fichier echouee');
+    reader.readAsDataURL(file);
+  }
+
+  function openGallery(e) {
+    e?.stopPropagation();
+    inputRef.current?.click();
+  }
+
+  function openCamera(e) {
+    e?.stopPropagation();
+    if (onOpenCamera) onOpenCamera(side);
+    else openGallery(e);
+  }
+
+  const qualityText = qLabel === 'bonne'
+    ? 'Bonne qualité'
+    : qLabel === 'acceptable'
+      ? 'Qualité acceptable'
+      : qLabel === 'faible'
+        ? 'Qualité faible'
+        : qLabel === 'inexploitable'
+          ? 'Qualité insuffisante'
+          : (getReadableMessage(quality?.messages?.[0], '') || '');
+
+  return (
+    <div className="cin-doc-zone-wrap">
+      <div
+        className={'cin-doc-zone' + (value ? ' has-img' : '') + (dragOver ? ' cin-doc-zone--drag' : '')}
+        onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragOver(false);
+          handleFile(e.dataTransfer?.files?.[0]);
+        }}
+      >
+        <CINFrame
+          hasImage={Boolean(value)}
+          detected={Boolean(value) && detected && !cropHint}
+          needsCheck={needsCheck}
+          hint={value ? '' : CIN_HINT}
+          className="cin-doc-zone-frame"
+        >
+          {value ? (
+            <>
+              {(value.startsWith('data:image') || value.startsWith('http')) ? (
+                <img src={value} alt={title} className="cin-id-frame-img" />
+              ) : (
+                <div className="cin-id-frame-empty"><span>Photo chargée</span></div>
+              )}
+              <button type="button" className="cin-doc-zone-clear"
+                onClick={e => { e.stopPropagation(); onChange('', null); }}
+                aria-label="Supprimer">
+                <X size={10} />
+              </button>
+            </>
+          ) : (
+            <div className="cin-doc-zone-empty" onClick={openCamera} role="button" tabIndex={0}
+              onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openCamera(); } }}>
+              <div className="cin-doc-zone-icon">
+                <Camera size={26} strokeWidth={1.75} />
+              </div>
+              <span className="cin-doc-zone-title">{title}</span>
+              <span className="cin-doc-zone-sub">Cadre CNIE · JPG, PNG, WEBP</span>
+            </div>
+          )}
+        </CINFrame>
+      </div>
+
+      <div className="cin-doc-zone-actions">
+        <button type="button" className="cin-doc-zone-gallery cin-doc-zone-gallery--primary" onClick={openCamera}>
+          <Camera size={14} /> {value ? 'Reprendre la photo' : 'Scanner la CNIE'}
+        </button>
+        <button type="button" className="cin-doc-zone-gallery" onClick={openGallery}>
+          <Upload size={12} /> Importer
+        </button>
+        {value && (
+          <button type="button" className="cin-doc-zone-gallery" onClick={() => onOpenManualCrop?.(originalDataUrl || value)}>
+            <ScanLine size={12} /> Recadrer manuellement
+          </button>
+        )}
+        {value && (
+          <button type="button" className="cin-doc-zone-gallery" onClick={() => onChange('', null)}>
+            <X size={12} /> Supprimer
+          </button>
+        )}
+      </div>
+      {needsCheck && (
+        <div className="cin-crop-hint-actions">
+          <div className="cin-crop-hint">{getReadableMessage(cropHint, 'Cadrage à vérifier')}</div>
+          <div className="cin-crop-hint-btns">
+            <button type="button" className="btn btn-ghost btn-sm" onClick={openCamera}>Reprendre la photo</button>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => onOpenManualCrop?.(originalDataUrl || value)}>Recadrer manuellement</button>
+            {originalDataUrl && onUseOriginal && (
+              <button type="button" className="btn btn-ghost btn-sm" onClick={onUseOriginal}>Continuer avec la photo originale</button>
+            )}
+          </div>
+        </div>
+      )}
+      {qLabel && qualityText && (
+        <div className={'cin-quality-badge cin-quality-badge--pill cin-quality-badge--' + qLabel}>
+          <span className="cin-quality-dot" aria-hidden />
+          {qualityText}
+        </div>
+      )}
+
+      {/* Galerie uniquement — pas de capture="environment" (caméra native sans cadre) */}
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/jpeg,image/png,image/webp"
+        onChange={e => { handleFile(e.target.files?.[0]); e.target.value = ''; }}
+        style={{ display: 'none' }}
+        tabIndex={-1}
+        aria-hidden="true"
+      />
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════
+   CIN SCANNER — Codia full-screen (capture UI only → OCR inchangé)
+   ══════════════════════════════════════════════════════ */
+
+const STABLE_FRAMES_REQUIRED = 22;
+const MIN_BRIGHTNESS = 45;
+
+function CINScanner({
+  onExtracted,
+  onClose,
+  onCaptureOnly,
+  mode = 'full',
+  captureSide = null,
+  initialRecto = '',
+  initialVerso = '',
+  initialStream = null,
+}) {
+  const isCaptureMode = mode === 'capture' && Boolean(captureSide);
+  const importUid = useId();
+  const galleryInputRef = useRef(null);
+  const hiddenInputStyle = {
+    position: 'absolute', width: 1, height: 1, padding: 0, margin: -1,
+    overflow: 'hidden', clip: 'rect(0,0,0,0)', whiteSpace: 'nowrap', border: 0,
+  };
+
+  const [phase, setPhase]           = useState('live');
+  const [side, setSide]             = useState(captureSide || 'recto');
+  const [cameraActive, setCamActive] = useState(false);
+  const [cameraLoading, setCamLoad] = useState(true);
+  const [cameraMsg, setCameraMsg]   = useState('');
+  const [rectoImg, setRecto]        = useState(initialRecto || null);
+  const [versoImg, setVerso]        = useState(initialVerso || null);
+  const [error, setError]           = useState('');
+  const [stableCount, setStable]    = useState(0);
+  const [captured, setCaptured]     = useState(false);
+  const [indLight, setIndLight]     = useState('off');
+  const [indFocus, setIndFocus]     = useState('off');
+  const [indReady, setIndReady]     = useState('off');
+  const [uploadStatus, setUploadStatus] = useState('');
+
+  const videoRef      = useRef(null);
+  const vfFrameRef    = useRef(null);
+  const streamRef     = useRef(null);
+  const canvasRef     = useRef(null);
+  const rafRef        = useRef(null);
+  const prevFrameRef  = useRef(null);
+  const stableRef     = useRef(0);
+  const sideRef       = useRef('recto');
+  const rectoRef      = useRef(initialRecto || null);
+  const versoRef      = useRef(initialVerso || null);
+  const rectoFileRef  = useRef(null);
+  const versoFileRef  = useRef(null);
+  const rectoFullDataUrlRef = useRef(null);
+  const versoFullDataUrlRef = useRef(null);
+  const analyzeLoopRef = useRef(null);
+  const dismissRef = useRef(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    console.info('[CIN Scanner] mounted', CIN_SCANNER_VERSION, {
+      secure: typeof window !== 'undefined' && window.isSecureContext,
+      ua: typeof navigator !== 'undefined' ? navigator.userAgent.slice(0, 80) : '',
+    });
+    preloadOcrEngine();
+  }, []);
+
+  useEffect(() => {
+    const prevBody = document.body.style.overflow;
+    const prevHtml = document.documentElement.style.overflow;
+    document.body.style.overflow = 'hidden';
+    document.documentElement.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prevBody;
+      document.documentElement.style.overflow = prevHtml;
+    };
+  }, []);
+
+  /* Retour téléphone (gesture / bouton système) + fermeture UI */
+  useEffect(() => {
+    let alive = true;
+    let ignorePop = false;
+    window.history.pushState({ cinScanner: true, t: Date.now() }, '');
+
+    const finish = () => {
+      if (!alive) return;
+      alive = false;
+      teardown();
+      onCloseRef.current();
+    };
+
+    const onPop = () => {
+      if (ignorePop) return;
+      finish();
+    };
+    window.addEventListener('popstate', onPop);
+
+    dismissRef.current = () => {
+      if (!alive) return;
+      alive = false;
+      teardown();
+      ignorePop = true;
+      onCloseRef.current();
+      window.history.back();
+    };
+
+    return () => {
+      window.removeEventListener('popstate', onPop);
+      alive = false;
+      dismissRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount once; onClose via ref
+  }, []);
+
+  function dismissScanner() {
+    if (dismissRef.current) dismissRef.current();
+    else {
+      teardown();
+      onClose();
+    }
+  }
+
+  useEffect(() => { sideRef.current = side; }, [side]);
+
+  useEffect(() => {
+    if (isCaptureMode && captureSide) {
+      setSide(captureSide);
+      sideRef.current = captureSide;
+    }
+  }, [isCaptureMode, captureSide]);
+
+  useEffect(() => {
+    if (phase !== 'live') return undefined;
+    if (initialStream) {
+      attachStream(initialStream);
+      return () => teardown();
+    }
+    setCamLoad(false);
+    if (!canUseCamera()) {
+      setCameraMsg(getCameraBlockedReason());
+    }
+    return () => teardown();
+  }, [phase, initialStream]);
+
+  function stopAnalyzeLoop() {
+    if (analyzeLoopRef.current) {
+      cancelAnimationFrame(analyzeLoopRef.current);
+      analyzeLoopRef.current = null;
+    }
+  }
+
+  function teardown() {
+    stopAnalyzeLoop();
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    rafRef.current = null;
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
+    }
+  }
+
+  async function tuneVideoTrack(stream) {
+    const track = stream.getVideoTracks()[0];
+    if (!track?.applyConstraints) return;
+    try {
+      await track.applyConstraints({
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1920, min: 1280 },
+        height: { ideal: 1080 },
+        advanced: [{ focusMode: 'continuous' }],
+      });
+    } catch {
+      try {
+        await track.applyConstraints({ facingMode: 'environment' });
+      } catch { /* iOS ignore */ }
+    }
+  }
+
+  async function attachStream(stream) {
+    if (!stream) return;
+    stopAnalyzeLoop();
+    streamRef.current = stream;
+    setCamLoad(true);
+    setCameraMsg('');
+    setError('');
+
+    try {
+      await tuneVideoTrack(stream);
+      setCamLoad(false);
+
+      const video = videoRef.current;
+      if (!video) {
+        setCamActive(false);
+        setCameraMsg('Élément vidéo indisponible.');
+        return;
+      }
+
+      video.srcObject = stream;
+      video.setAttribute('playsinline', 'true');
+      video.setAttribute('webkit-playsinline', 'true');
+      video.playsInline = true;
+      video.muted = true;
+
+      await new Promise((resolve) => {
+        if (video.readyState >= 1) { resolve(); return; }
+        const onReady = () => { video.removeEventListener('loadedmetadata', onReady); resolve(); };
+        video.addEventListener('loadedmetadata', onReady);
+        setTimeout(resolve, 2500);
+      });
+
+      try {
+        await video.play();
+      } catch (playErr) {
+        console.warn('[CIN Scanner] video.play()', playErr);
+      }
+      setCamActive(true);
+      prevFrameRef.current = null;
+      stableRef.current = 0;
+      analyzeFrame();
+    } catch (err) {
+      console.warn('[CIN Scanner] attachStream', err?.name || err);
+      setCamActive(false);
+      setCameraMsg(getCameraErrorMessage(err));
+      setCamLoad(false);
+    }
+  }
+
+  async function startCamera() {
+    stopAnalyzeLoop();
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
+    }
+    setCamActive(false);
+    setCamLoad(true);
+    setCameraMsg('');
+    setError('');
+
+    if (!canUseCamera()) {
+      setCamActive(false);
+      setCameraMsg(getCameraBlockedReason());
+      setCamLoad(false);
+      return;
+    }
+
+    try {
+      const stream = await getCINCameraStream();
+      await attachStream(stream);
+    } catch (err) {
+      console.warn('[CIN Scanner] startCamera', err?.name || err, err?.message || '');
+      setCamActive(false);
+      setCameraMsg(getCameraErrorMessage(err));
+      setCamLoad(false);
+    }
+  }
+
+  async function analyzePhotos(recto, verso) {
+    if (!recto) {
+      setError('Capturez ou importez au moins le recto de la CIN.');
+      return;
+    }
+    if (!verso) {
+      setError('Le verso est obligatoire pour l’analyse CIN.');
+      return;
+    }
+    teardown();
+    setPhase('uploading');
+    setUploadStatus('Préparation…');
+    setError('');
+    try {
+      const result = await scanCIN(recto, verso, {
+        rectoFile: rectoFileRef.current,
+        versoFile: versoFileRef.current,
+        rectoFullDataUrl: rectoFullDataUrlRef.current,
+        versoFullDataUrl: versoFullDataUrlRef.current,
+        onProgress: setUploadStatus,
+      });
+      onExtracted(result);
+      dismissScanner();
+    } catch (err) {
+      const msg = (err?.message && err.message.length < 160)
+        ? err.message
+        : 'Erreur lecture image — saisissez les champs manuellement.';
+      setError(msg);
+      setPhase('live');
+    }
+  }
+
+  function analyzeFrame() {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas || !streamRef.current) return;
+    if (video.readyState < 2) {
+      analyzeLoopRef.current = requestAnimationFrame(analyzeFrame);
+      return;
+    }
+
+    const W = video.videoWidth || 640;
+    const H = video.videoHeight || 480;
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, W, H);
+
+    const imageData = ctx.getImageData(0, 0, W, H);
+    const { brightness, motionScore } = analyzePixels(imageData, prevFrameRef.current);
+    prevFrameRef.current = imageData;
+
+    const lightOk = brightness > MIN_BRIGHTNESS;
+    const motionOk = motionScore < 14;
+    const isStable = lightOk && motionOk;
+
+    if (isStable) stableRef.current += 1;
+    else stableRef.current = Math.max(0, stableRef.current - 2);
+
+    const progress = Math.min(1, stableRef.current / STABLE_FRAMES_REQUIRED);
+    setStable(Math.round(progress * 100));
+    setIndLight(lightOk ? 'ok' : 'warn');
+    setIndFocus(motionOk ? 'ok' : 'warn');
+    setIndReady(progress >= 1 ? 'ok' : progress >= 0.6 ? 'warn' : 'off');
+
+    analyzeLoopRef.current = requestAnimationFrame(analyzeFrame);
+  }
+
+  function analyzePixels(current, previous) {
+    const d = current.data;
+    let brightnessSum = 0;
+    let motionSum = 0;
+    const step = 8;
+    let count = 0;
+    for (let i = 0; i < d.length; i += step * 4) {
+      const r = d[i], g = d[i + 1], b = d[i + 2];
+      brightnessSum += (r + g + b) / 3;
+      if (previous) {
+        const pd = previous.data;
+        motionSum += Math.abs(r - pd[i]) + Math.abs(g - pd[i + 1]) + Math.abs(b - pd[i + 2]);
+      }
+      count++;
+    }
+    return {
+      brightness: count > 0 ? brightnessSum / count : 128,
+      motionScore: count > 0 ? motionSum / count : 0,
+    };
+  }
+
+  async function captureCurrentSide() {
+    const video = videoRef.current;
+    const frameEl = vfFrameRef.current;
+    if (!video || !frameEl || phase !== 'live') return;
+    if (!streamRef.current || video.readyState < 2) return;
+
+    try {
+      const {
+        previewDataUrl, ocrFile, fullDataUrl, detected, cropMessage,
+      } = await captureCINFromVideo(video, frameEl, sideRef.current);
+      console.info('[OCR CIN] using original/cropped file', {
+        side: sideRef.current,
+        ocrBytes: ocrFile.size,
+        detected: Boolean(detected),
+        display: 'unified-preview-ocr',
+      });
+
+      setCaptured(true);
+      setTimeout(() => setCaptured(false), 400);
+
+      if (sideRef.current === 'recto') {
+        rectoRef.current = previewDataUrl;
+        rectoFileRef.current = ocrFile;
+        rectoFullDataUrlRef.current = fullDataUrl || previewDataUrl;
+        setRecto(previewDataUrl);
+        if (!detected && cropMessage) setError(cropMessage);
+        if (!isCaptureMode && !versoRef.current) setSide('verso');
+      } else {
+        versoRef.current = previewDataUrl;
+        versoFileRef.current = ocrFile;
+        versoFullDataUrlRef.current = fullDataUrl || previewDataUrl;
+        setVerso(previewDataUrl);
+        if (!detected && cropMessage) setError(cropMessage);
+      }
+    } catch (err) {
+      console.error('[SCAN CIN] capture failed', err);
+      setError('Capture impossible — placez toute la carte dans le cadre et réessayez.');
+    }
+  }
+
+  function retakeCurrentSide() {
+    if (side === 'recto') {
+      rectoRef.current = null;
+      rectoFileRef.current = null;
+      rectoFullDataUrlRef.current = null;
+      setRecto(null);
+    } else {
+      versoRef.current = null;
+      versoFileRef.current = null;
+      versoFullDataUrlRef.current = null;
+      setVerso(null);
+    }
+    stableRef.current = 0;
+    prevFrameRef.current = null;
+    setStable(0);
+  }
+
+  function readImageFile(file, targetSide, onDone) {
+    if (!file) return;
+    const type = (file.type || '').toLowerCase();
+    const name = (file.name || '').toLowerCase();
+    if (type === 'application/pdf') {
+      setError('PDF non supporté pour l\'OCR. Utilisez une photo JPG ou PNG.');
+      return;
+    }
+    if (!type.startsWith('image/') && !/\.(jpe?g|png|webp|heic|heif)$/i.test(name)) {
+      setError('Format non supporté. Utilisez une photo.');
+      return;
+    }
+    console.info('[OCR CIN] mobile file selected', { name: file.name, type: file.type || '(vide)', size: file.size });
+    const reader = new FileReader();
+    reader.onload = async (ev) => {
+      try {
+        const prepared = await prepareImportedCINImage(ev.target.result, file, targetSide);
+        console.info('[OCR CIN] using original/cropped file', {
+          side: targetSide,
+          ocrBytes: prepared.ocrFile.size,
+          display: 'cropped-import',
+        });
+        onDone(prepared.previewDataUrl, prepared.ocrFile, prepared.fullDataUrl);
+      } catch (err) {
+        console.error('[SCAN CIN] import crop failed', err);
+        setError('Impossible de recadrer l\'image importée.');
+      }
+    };
+    reader.onerror = () => setError('Impossible de lire le fichier image.');
+    reader.readAsDataURL(file);
+  }
+
+  function assignImportedImage(targetSide, dataUrl, file, fullDataUrl) {
+    if (targetSide === 'recto') {
+      rectoRef.current = dataUrl;
+      rectoFileRef.current = file;
+      rectoFullDataUrlRef.current = fullDataUrl || null;
+      setRecto(dataUrl);
+    } else {
+      versoRef.current = dataUrl;
+      versoFileRef.current = file;
+      versoFullDataUrlRef.current = fullDataUrl || null;
+      setVerso(dataUrl);
+    }
+    setSide(targetSide);
+    setError('');
+    if (isCaptureMode && onCaptureOnly) {
+      onCaptureOnly(targetSide, dataUrl, file, fullDataUrl);
+      dismissScanner();
+      return;
+    }
+  }
+
+  function confirmCaptureSide() {
+    const s = isCaptureMode ? (captureSide || sideRef.current) : sideRef.current;
+    const preview = s === 'recto' ? rectoRef.current : versoRef.current;
+    const file = s === 'recto' ? rectoFileRef.current : versoFileRef.current;
+    const fullDataUrl = s === 'recto' ? rectoFullDataUrlRef.current : versoFullDataUrlRef.current;
+    if (!preview) {
+      setError('Capturez ou importez une photo avant de valider.');
+      return;
+    }
+    if (onCaptureOnly) onCaptureOnly(s, preview, file, fullDataUrl);
+    dismissScanner();
+  }
+
+  const currentSideHasImage = isCaptureMode
+    ? (captureSide === 'recto' ? Boolean(rectoImg) : Boolean(versoImg))
+    : Boolean(rectoImg);
+
+  function openGalleryPicker() {
+    galleryInputRef.current?.click();
+  }
+
+  function handleGalleryPick(e) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    e.target.value = '';
+    const targetSide = isCaptureMode && captureSide ? captureSide : side;
+    readImageFile(f, targetSide, (dataUrl, file, fullDataUrl) => assignImportedImage(targetSide, dataUrl, file, fullDataUrl));
+  }
+
+  const activeSide = isCaptureMode && captureSide ? captureSide : side;
+  const isRecto = activeSide === 'recto';
+  const progressPct = Math.max(0, Math.min(100, Number(stableCount) || 0));
+  const frameReady = progressPct >= 100;
+  const sideFaceLabel = isRecto ? 'RECTO — FACE PRINCIPALE' : 'VERSO — DOS DE LA CARTE';
+
+  const insecureContext = typeof window !== 'undefined' && !window.isSecureContext;
+
+  if (phase === 'uploading') {
+    return createPortal(
+      <div className="cin-scanner-overlay cin-scanner-overlay--dark" data-cin-scanner={CIN_SCANNER_VERSION}>
+        <button type="button" className="cin-back-btn" style={{ position: 'absolute', top: 'calc(12px + env(safe-area-inset-top, 0px))', left: 14, zIndex: 60 }} onClick={dismissScanner} aria-label="Retour">
+          <ChevronLeft size={20} /> Retour
+        </button>
+        <div className="cin-upload-box">
+          <Loader size={32} className="cin-spin" style={{ color: 'var(--red)' }} />
+          <div className="cin-upload-title">Analyse en cours...</div>
+          <div className="cin-upload-sub">{uploadStatus || 'Extraction des données CIN (CITYMO OCR)'}</div>
+          <div className="cin-upload-previews">
+            {rectoImg && <img src={rectoImg} alt="Recto" className="cin-upload-thumb" />}
+            {versoImg && <img src={versoImg} alt="Verso" className="cin-upload-thumb" />}
+          </div>
+        </div>
+      </div>,
+      document.body,
+    );
+  }
+
+  return createPortal(
+    <div
+      className="cin-scanner-overlay cin-scanner-overlay--dark cin-scanner-live"
+      data-cin-scanner={CIN_SCANNER_VERSION}
+    >
+      <canvas ref={canvasRef} style={{ display: 'none' }} />
+      <video
+        ref={videoRef}
+        className={'cin-camera-feed' + (cameraActive ? '' : ' cin-camera-feed--off')}
+        autoPlay
+        playsInline
+        muted
+      />
+
+      {!cameraActive && (
+        <div className="cin-camera-placeholder" aria-hidden="true" />
+      )}
+
+      {cameraLoading && (
+        <div className="cin-camera-loading">
+          <Loader size={28} className="cin-spin" style={{ color: 'var(--red)' }} />
+          <span>Activation caméra...</span>
+        </div>
+      )}
+
+      {(cameraMsg || error) && !cameraActive && !cameraLoading && (
+        <div className="cin-camera-blocked">
+          <AlertCircle size={16} />
+          <p>{cameraMsg || error}</p>
+          {canUseCamera() && (
+            <button type="button" className="cin-action-btn cin-action-btn--primary" onClick={startCamera}>
+              <Camera size={14} /> {cameraMsg ? 'Réessayer la caméra' : 'Activer la caméra'}
+            </button>
+          )}
+          <button type="button" className="cin-action-btn cin-action-btn--ghost" onClick={openGalleryPicker}>
+            <Upload size={14} /> Importer depuis galerie
+          </button>
+          <button type="button" className="cin-action-btn cin-action-btn--ghost" onClick={dismissScanner}>
+            <ChevronLeft size={14} /> Retour au formulaire
+          </button>
+        </div>
+      )}
+
+      {!cameraActive && !cameraLoading && !cameraMsg && !error && canUseCamera() && (
+        <div className="cin-camera-blocked">
+          <button type="button" className="cin-action-btn cin-action-btn--primary" onClick={startCamera}>
+            <Camera size={16} /> Activer la caméra
+          </button>
+        </div>
+      )}
+
+      {insecureContext && (
+        <div className="cin-https-banner">
+          HTTPS requis sur iPhone pour la caméra custom — utilisez l’URL https:// affichée au démarrage du serveur.
+        </div>
+      )}
+
+      <svg className="cin-mask-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+        <defs>
+          <mask id={`cin-cutout-${importUid}`}>
+            <rect width="100" height="100" fill="white" />
+            <rect x="6" y="22.25" width="88" height="55.50" rx="2.2" ry="2.2" fill="black" />
+          </mask>
+        </defs>
+        <rect width="100" height="100" fill="rgba(0,0,0,0.72)" mask={`url(#cin-cutout-${importUid})`} />
+      </svg>
+
+      <div
+        ref={vfFrameRef}
+        className={'cin-vf-frame' + (frameReady ? ' cin-vf-frame--ready' : '')}
+        role="button"
+        tabIndex={0}
+        aria-label="Capturer la CIN"
+        onClick={() => { if (cameraActive) captureCurrentSide(); }}
+        onKeyDown={(e) => {
+          if ((e.key === 'Enter' || e.key === ' ') && cameraActive) {
+            e.preventDefault();
+            captureCurrentSide();
+          }
+        }}
+      >
+        <span className="cin-vf-corner cin-vf-corner--tl" />
+        <span className="cin-vf-corner cin-vf-corner--tr" />
+        <span className="cin-vf-corner cin-vf-corner--bl" />
+        <span className="cin-vf-corner cin-vf-corner--br" />
+        {frameReady && cameraActive && (
+          <div className="cin-vf-ready-hint">
+            Cadre stable — appuyez pour capturer
+          </div>
+        )}
+        {!frameReady && cameraActive && (
+          <div className="cin-vf-place-hint">
+            Placez toute la carte dans le cadre
+          </div>
+        )}
+        {captured && <div className="cin-capture-flash" />}
+      </div>
+
+      <div className="cin-top-bar">
+        <button type="button" className="cin-back-btn" onClick={dismissScanner} aria-label="Retour">
+          <ChevronLeft size={20} /> Retour
+        </button>
+        <div className="cin-side-badge-wrap">
+          <span className={'cin-side-badge ' + (isRecto ? 'cin-side-badge--recto' : 'cin-side-badge--verso')}>
+            {isRecto ? 'RECTO' : 'VERSO'}
+          </span>
+          <span className="cin-step-label">{rectoImg ? (versoImg ? '2/2' : '1/2') : '0/2'}</span>
+        </div>
+        <button type="button" className="cin-close-btn" onClick={dismissScanner} aria-label="Fermer"><X size={18} /></button>
+      </div>
+
+      <div className="cin-indicators">
+        <div className={'cin-ind ' + indLight}>
+          <span className="cin-ind-dot" />
+          <span className="cin-ind-label">Lumière</span>
+        </div>
+        <div className={'cin-ind ' + indFocus}>
+          <span className="cin-ind-dot" />
+          <span className="cin-ind-label">Stabilité</span>
+        </div>
+        <div className={'cin-ind ' + indReady}>
+          <span className="cin-ind-dot" />
+          <span className="cin-ind-label">Prêt</span>
+        </div>
+      </div>
+
+      <div className={'cin-progress-bar-wrap' + (frameReady ? ' ready' : '')}>
+        <div className="cin-progress-bar" style={{ width: progressPct + '%' }} />
+      </div>
+
+      <div className="cin-hint-bar">
+        <span className="cin-hint-text">{SCANNER_PLACE_HINT}</span>
+        <span className="cin-hint-side">{sideFaceLabel}</span>
+        <span className="cin-hint-tap">Appuyez pour capturer</span>
+      </div>
+
+      {(rectoImg || versoImg) && !isCaptureMode && (
+        <div className="cin-capture-thumbs">
+          {rectoImg && (
+            <button type="button" className={'cin-capture-thumb' + (isRecto ? ' active' : '')} onClick={() => setSide('recto')}>
+              <img src={rectoImg} alt="Recto capturé" />
+              <span>Recto</span>
+            </button>
+          )}
+          {versoImg && (
+            <button type="button" className={'cin-capture-thumb' + (!isRecto ? ' active' : '')} onClick={() => setSide('verso')}>
+              <img src={versoImg} alt="Verso capturé" />
+              <span>Verso</span>
+            </button>
+          )}
+        </div>
+      )}
+
+      {!isCaptureMode && (
+        <div className="cin-side-switch cin-side-switch--live">
+          <button type="button" className={'cin-side-switch-btn' + (isRecto ? ' active recto' : '')} onClick={() => setSide('recto')}>Recto</button>
+          <button type="button" className={'cin-side-switch-btn' + (!isRecto ? ' active verso' : '')} onClick={() => setSide('verso')}>Verso</button>
+        </div>
+      )}
+
+      <div className="cin-scanner-actions">
+        {!isCaptureMode && (
+          <button type="button" className="cin-action-btn cin-action-btn--ghost" onClick={openGalleryPicker}>
+            <Upload size={16} /> Galerie
+          </button>
+        )}
+        {/* Pas de capture= — galerie uniquement, jamais caméra native iOS */}
+        <input
+          ref={galleryInputRef}
+          type="file"
+          accept="image/jpeg,image/png,image/webp,image/heic,image/heif"
+          style={hiddenInputStyle}
+          tabIndex={-1}
+          aria-hidden="true"
+          onChange={handleGalleryPick}
+        />
+
+        <button type="button" className="cin-action-btn cin-action-btn--ghost" onClick={retakeCurrentSide}>
+          <RefreshCw size={16} /> Reprendre
+        </button>
+
+        <button type="button" className={'cin-action-btn cin-action-btn--capture' + (frameReady && cameraActive ? ' ready' : '')}
+          disabled={!cameraActive}
+          onClick={captureCurrentSide}>
+          <Camera size={18} /> Capturer
+        </button>
+
+        {isCaptureMode ? (
+          <button type="button" className="cin-action-btn cin-action-btn--primary"
+            disabled={!currentSideHasImage}
+            onClick={confirmCaptureSide}>
+            <CheckCircle size={16} /> Utiliser cette photo
+          </button>
+        ) : (
+          <button type="button" className="cin-action-btn cin-action-btn--primary" disabled={!rectoImg}
+            onClick={() => analyzePhotos(rectoRef.current, versoRef.current)}>
+            <ScanLine size={16} /> Analyser
+          </button>
+        )}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function MobileOuvrierRow({ w, cfg, pdfLoading, onView, onEdit, onPdf, onDelete }) {
+  return (
+    <div className="rh-ext-mobile-row">
+      <button type="button" className="rh-ext-mobile-row-main" onClick={onView} aria-label={`Voir fiche ${w.prenom} ${w.nom}`}>
+        <Avatar worker={w} size={36} />
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <strong>{w.prenom} {w.nom}</strong>
+          <span>{w.fonction || '—'}</span>
+        </div>
+      </button>
+      <span className={`badge ${cfg.cls}`} style={{ fontSize: '0.65rem', flexShrink: 0, marginTop: 4 }}>{cfg.label}</span>
+      <div className="rh-ext-mobile-row-actions">
+        <button type="button" className="btn btn-ghost btn-sm" title="Voir fiche" aria-label="Voir fiche" onClick={onView}><Eye size={14} /></button>
+        <button type="button" className="btn btn-ghost btn-sm" title="Modifier" aria-label="Modifier" onClick={onEdit}><Edit2 size={14} /></button>
+        <button type="button" className="btn btn-ghost btn-sm" title="Télécharger PDF" aria-label="Télécharger" disabled={pdfLoading} onClick={onPdf}>
+          {pdfLoading ? <Loader size={14} style={{ animation: 'spin 0.8s linear infinite' }} /> : <Download size={14} />}
+        </button>
+        <button type="button" className="btn btn-ghost btn-sm" title="Supprimer" aria-label="Supprimer" onClick={onDelete} style={{ color: 'var(--red)' }}><Trash2 size={14} /></button>
+      </div>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════
+   OUVRIER DETAIL PAGE
+   ══════════════════════════════════════════════════════ */
+function OuvrierDetail({ worker, onBack, onEdit, onDownloadPdf, pdfLoading }) {
+  const [tab, setTab] = useState('infos');
+  const tabs = [
+    { id: 'infos',      label: 'Informations' },
+    { id: 'documents',  label: 'Documents' },
+    { id: 'securite',   label: 'Securite' },
+    { id: 'equipements', label: 'Equipements' },
+  ];
+  const cfg = STATUT_CFG[worker.statut] || STATUT_CFG.actif;
+
+  return (
+    <div className="animate-fade-in rh-ext-page">
+      <div className="rh-ext-back-bar">
+        <button type="button" className="rh-ext-back-btn" onClick={onBack} aria-label="Retour aux ouvriers">
+          <ChevronLeft size={16} /> Retour aux ouvriers
+        </button>
+        <button type="button" className="rh-ext-back-close" onClick={onBack} aria-label="Fermer" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-3)', minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' }}>
+          <X size={20} />
+        </button>
+      </div>
+
+      {/* Profile header */}
+      <div className="card rh-ext-profile-card">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 24, flexWrap: 'wrap' }}>
+          <Avatar worker={worker} size={80} />
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 4 }}>
+              <h1 style={{ fontFamily: 'var(--font-head)', fontWeight: 800, fontSize: '1.5rem', color: 'var(--text)', margin: 0 }}>
+                {worker.prenom} {worker.nom}
+              </h1>
+              <span className={'badge ' + cfg.cls}>{cfg.label}</span>
+            </div>
+            <div style={{ fontSize: '0.88rem', color: 'var(--text-2)', marginBottom: 8 }}>{worker.fonction || '—'}</div>
+            <div style={{ display: 'flex', gap: 16, fontSize: '0.82rem', color: 'var(--text-3)', flexWrap: 'wrap' }}>
+              <span><Phone size={12} style={{ display: 'inline', marginRight: 4 }} />{worker.telephone || '—'}</span>
+              <span>CIN : <strong style={{ color: 'var(--text-2)' }}>{worker.cin || '—'}</strong></span>
+              {worker.chantier && <span><MapPin size={12} style={{ display: 'inline', marginRight: 4 }} />{worker.chantier}</span>}
+            </div>
+          </div>
+          <div className="rh-ext-detail-header-actions">
+            <button className="btn btn-ghost" onClick={() => onEdit(worker)} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <Edit2 size={13} /> Modifier
+            </button>
+            <button className="btn btn-primary" disabled={pdfLoading} onClick={() => onDownloadPdf(worker)}
+              style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              {pdfLoading ? <Loader size={13} style={{ animation: 'spin 0.8s linear infinite' }} /> : <Download size={13} />}
+              {pdfLoading ? 'Génération…' : 'Télécharger fiche'}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div className="rh-ext-detail-tabs">
+        {tabs.map(t => (
+          <button key={t.id} type="button" onClick={() => setTab(t.id)} className="rh-ext-detail-tab-btn" style={{ fontWeight: tab === t.id ? 700 : 500, color: tab === t.id ? 'var(--red)' : 'var(--text-2)', borderBottom: tab === t.id ? '2px solid var(--red)' : '2px solid transparent' }}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Tab content */}
+      {tab === 'infos' && (
+        <div className="rh-ext-fields-grid">
+          <div className="card" style={{ padding: '20px 22px' }}>
+            <STitle><User size={14} /> Informations personnelles</STitle>
+            {[
+              ['Nom complet', worker.prenom + ' ' + worker.nom],
+              ['Telephone', worker.telephone],
+              ['CIN', worker.cin],
+            ].map(([k, v]) => v ? (
+              <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.83rem', padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
+                <span style={{ color: 'var(--text-3)' }}>{k}</span>
+                <span style={{ fontWeight: 600 }}>{v}</span>
+              </div>
+            ) : null)}
+          </div>
+          <div className="card" style={{ padding: '20px 22px' }}>
+            <STitle><HardHat size={14} /> Infos métier</STitle>
+            {[
+              ['Fonction', worker.fonction],
+              ['Experience', formatExperienceStars(worker.experience)],
+              ['Date de première intervention', fmtDate(worker.date_recrutement)],
+              ['Statut', STATUT_CFG[worker.statut]?.label || worker.statut],
+              ['Tarif journalier', fmtTarifJour(workerTarifJournalier(worker))],
+            ].map(([k, v]) => v ? (
+              <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.83rem', padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
+                <span style={{ color: 'var(--text-3)' }}>{k}</span>
+                <span style={{ fontWeight: 600 }}>{v}</span>
+              </div>
+            ) : null)}
+          </div>
+        </div>
+      )}
+
+      {tab === 'documents' && (
+        <div className="rh-ext-fields-grid">
+          <div className="card" style={{ padding: '20px 22px' }}>
+            <STitle><FileText size={14} /> CIN Recto</STitle>
+            {worker.cin_recto ? (
+              <CINFrame hasImage hint="">
+                <img src={worker.cin_recto} alt="CIN recto" className="cin-id-frame-img" />
+              </CINFrame>
+            ) : (
+              <div style={{ textAlign: 'center', padding: '32px 0', color: 'var(--text-3)', fontSize: '0.85rem', background: 'var(--bg)', borderRadius: 8 }}>Aucun document charge</div>
+            )}
+          </div>
+          <div className="card" style={{ padding: '20px 22px' }}>
+            <STitle><FileText size={14} /> CIN Verso</STitle>
+            {worker.cin_verso ? (
+              <CINFrame hasImage hint="">
+                <img src={worker.cin_verso} alt="CIN verso" className="cin-id-frame-img" />
+              </CINFrame>
+            ) : (
+              <div style={{ textAlign: 'center', padding: '32px 0', color: 'var(--text-3)', fontSize: '0.85rem', background: 'var(--bg)', borderRadius: 8 }}>Aucun document charge</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {tab === 'securite' && (
+        <div className="card" style={{ padding: '20px 22px', maxWidth: 480 }}>
+          <STitle><Shield size={14} /> Contact urgence</STitle>
+          {[
+            ['Contact', worker.contact_urgence],
+            ['Telephone', worker.tel_urgence],
+            ['Relation', worker.relation_urgence],
+          ].map(([k, v]) => (
+            <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.83rem', padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
+              <span style={{ color: 'var(--text-3)' }}>{k}</span>
+              <span style={{ fontWeight: 600 }}>{v || '—'}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {tab === 'equipements' && (
+        <div className="card" style={{ padding: '20px 22px', maxWidth: 480 }}>
+          <STitle><Package size={14} /> Equipements attribues</STitle>
+          {[
+            ['Pointure', worker.pointure],
+            ['Taille vetement', worker.taille_vetement],
+            ['Taille gants', worker.taille_gants],
+          ].map(([k, v]) => (
+            <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.83rem', padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
+              <span style={{ color: 'var(--text-3)' }}>{k}</span>
+              <span style={{ fontWeight: 600 }}>{v || '—'}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════
+   OUVRIER FORM MODAL
+   ══════════════════════════════════════════════════════ */
+function OuvrierModal({ worker, onClose, onSave, saving, workers = [], onOpenExisting }) {
+  const isEdit = !!worker;
+  const [form, setForm] = useState(() => formFromWorker(worker));
+  const [errors, setErrors] = useState({});
+  const [showScanner, setShowScanner] = useState(false);
+  const [scannerStream, setScannerStream] = useState(null);
+  const [scannerMode, setScannerMode] = useState('full');
+  const [captureSide, setCaptureSide] = useState(null);
+  const [formTab, setFormTab] = useState('identite');
+  const [ocrFilled, setOcrFilled]   = useState(false);
+  const [ocrToast,  setOcrToast]    = useState('');
+  const [ocrToastType, setOcrToastType] = useState('success');
+  const [ocrAnalyzing, setOcrAnalyzing] = useState(false);
+  const [ocrProgress, setOcrProgress] = useState('');
+  const [ocrFieldMeta, setOcrFieldMeta] = useState(null); // { cin: {confidence, confidence_pct}, ... }
+  const [forceOcr, setForceOcr] = useState(false);
+  const [qualityRecto, setQualityRecto] = useState(null);
+  const [qualityVerso, setQualityVerso] = useState(null);
+  const [cropHintRecto, setCropHintRecto] = useState('');
+  const [cropHintVerso, setCropHintVerso] = useState('');
+  const [detectedRecto, setDetectedRecto] = useState(false);
+  const [detectedVerso, setDetectedVerso] = useState(false);
+  const [originalRecto, setOriginalRecto] = useState('');
+  const [originalVerso, setOriginalVerso] = useState('');
+  const [manualCropSide, setManualCropSide] = useState(null); // 'recto' | 'verso' | null
+  const [guidedCameraSide, setGuidedCameraSide] = useState(null); // 'recto' | 'verso' | null
+  const [fieldConflicts, setFieldConflicts] = useState(null);
+  const [duplicateHit, setDuplicateHit] = useState(null);
+  const [cinAmbiguous, setCinAmbiguous] = useState(null); // candidates[]
+  const ocrFilesRef = useRef({ recto: null, verso: null });
+  const ocrFullDataUrlRef = useRef({ recto: null, verso: null });
+  const cinOriginalRef = useRef({ recto: null, verso: null });
+  const lastOcrMetaRef = useRef(null);
+
+  const formTabs = [
+    { id: 'identite',    label: 'Identite' },
+    { id: 'chantier',    label: 'Métier' },
+    { id: 'securite',    label: 'Securite' },
+    { id: 'documents',   label: 'Documents' },
+    { id: 'equipements', label: 'Equipements' },
+  ];
+
+  function set(k, v) { setForm(p => ({ ...p, [k]: v })); }
+
+  function flashOcrToast(message, type = 'success', ms = 7000) {
+    const msg = getReadableMessage(message, type === 'error'
+      ? 'Analyse impossible — saisie manuelle disponible.'
+      : 'Notification OCR');
+    setOcrToastType(type === 'error' ? 'error' : 'success');
+    setOcrToast(msg);
+    setTimeout(() => setOcrToast(''), ms);
+  }
+
+  async function handleCINDocImport(side, preview, file) {
+    if (!preview) {
+      set(side === 'recto' ? 'cin_recto' : 'cin_verso', '');
+      ocrFilesRef.current[side] = null;
+      ocrFullDataUrlRef.current[side] = null;
+      cinOriginalRef.current[side] = null;
+      if (side === 'recto') {
+        setQualityRecto(null); setCropHintRecto(''); setDetectedRecto(false); setOriginalRecto('');
+      } else {
+        setQualityVerso(null); setCropHintVerso(''); setDetectedVerso(false); setOriginalVerso('');
+      }
+      return;
+    }
+    if (!file) {
+      set(side === 'recto' ? 'cin_recto' : 'cin_verso', preview);
+      cinOriginalRef.current[side] = preview;
+      if (side === 'recto') setOriginalRecto(preview);
+      else setOriginalVerso(preview);
+      ocrFullDataUrlRef.current[side] = preview;
+      const q = await assessClientQuality(preview);
+      if (side === 'recto') setQualityRecto(q);
+      else setQualityVerso(q);
+      return;
+    }
+    try {
+      const prepared = await prepareImportedCINImage(preview, file, side);
+      // Même image pour preview ET OCR
+      set(side === 'recto' ? 'cin_recto' : 'cin_verso', prepared.previewDataUrl);
+      ocrFilesRef.current[side] = prepared.ocrFile;
+      ocrFullDataUrlRef.current[side] = prepared.fullDataUrl || prepared.previewDataUrl || null;
+      cinOriginalRef.current[side] = prepared.originalDataUrl || preview;
+      if (side === 'recto') setOriginalRecto(prepared.originalDataUrl || preview);
+      else setOriginalVerso(prepared.originalDataUrl || preview);
+      const q = await assessClientQuality(prepared.previewDataUrl);
+      if (side === 'recto') {
+        setQualityRecto(q);
+        setDetectedRecto(Boolean(prepared.detected));
+        setCropHintRecto(prepared.detected ? '' : (prepared.cropMessage || 'Cadrage à vérifier'));
+      } else {
+        setQualityVerso(q);
+        setDetectedVerso(Boolean(prepared.detected));
+        setCropHintVerso(prepared.detected ? '' : (prepared.cropMessage || 'Cadrage à vérifier'));
+      }
+    } catch (err) {
+      console.error('[SCAN CIN] doc zone crop failed', getReadableMessage(err));
+      set(side === 'recto' ? 'cin_recto' : 'cin_verso', preview);
+      ocrFilesRef.current[side] = file;
+      ocrFullDataUrlRef.current[side] = preview;
+      cinOriginalRef.current[side] = preview;
+      if (side === 'recto') setOriginalRecto(preview);
+      else setOriginalVerso(preview);
+      const q = await assessClientQuality(preview);
+      if (side === 'recto') {
+        setQualityRecto(q);
+        setDetectedRecto(false);
+        setCropHintRecto('Cadrage à vérifier');
+      } else {
+        setQualityVerso(q);
+        setDetectedVerso(false);
+        setCropHintVerso('Cadrage à vérifier');
+      }
+    }
+  }
+
+  async function applyCinOriginal(side) {
+    const original = cinOriginalRef.current[side] || (side === 'recto' ? originalRecto : originalVerso);
+    if (!original) return;
+    const file = dataUrlToCaptureFile(original, side, 'original');
+    set(side === 'recto' ? 'cin_recto' : 'cin_verso', original);
+    ocrFilesRef.current[side] = file;
+    ocrFullDataUrlRef.current[side] = original;
+    const q = await assessClientQuality(original);
+    if (side === 'recto') {
+      setQualityRecto(q);
+      setDetectedRecto(false);
+      setCropHintRecto('Cadrage à vérifier');
+    } else {
+      setQualityVerso(q);
+      setDetectedVerso(false);
+      setCropHintVerso('Cadrage à vérifier');
+    }
+  }
+
+  async function applyManualCrop(side, result) {
+    if (!result?.previewDataUrl) return;
+    set(side === 'recto' ? 'cin_recto' : 'cin_verso', result.previewDataUrl);
+    ocrFilesRef.current[side] = result.ocrFile;
+    ocrFullDataUrlRef.current[side] = result.fullDataUrl || result.previewDataUrl;
+    const q = await assessClientQuality(result.previewDataUrl);
+    if (side === 'recto') {
+      setQualityRecto(q);
+      setDetectedRecto(true);
+      setCropHintRecto('');
+    } else {
+      setQualityVerso(q);
+      setDetectedVerso(true);
+      setCropHintVerso('');
+    }
+    setManualCropSide(null);
+  }
+
+  function openCINScanner() {
+    setFormTab('documents');
+    setGuidedCameraSide('recto');
+  }
+
+  function openCINScannerForSide(side) {
+    setFormTab('documents');
+    setGuidedCameraSide(side === 'verso' || side === 'back' ? 'verso' : 'recto');
+  }
+
+  /** Photo issue de la caméra guidée : aperçu === OCR (pas d’auto-crop). */
+  async function applyGuidedCapture(payload) {
+    const side = payload?.side === 'verso' || payload?.side === 'back' ? 'verso' : 'recto';
+    if (payload?.fromGallery) {
+      await handleCINDocImport(side, payload.previewDataUrl, payload.ocrFile);
+      setGuidedCameraSide(null);
+      return;
+    }
+    const preview = payload?.previewDataUrl;
+    if (!preview) {
+      setGuidedCameraSide(null);
+      return;
+    }
+    const file = payload.ocrFile || dataUrlToCaptureFile(preview, side, 'guided-frame');
+    set(side === 'recto' ? 'cin_recto' : 'cin_verso', preview);
+    ocrFilesRef.current[side] = file;
+    ocrFullDataUrlRef.current[side] = payload.fullDataUrl || preview;
+    cinOriginalRef.current[side] = preview;
+    if (side === 'recto') {
+      setOriginalRecto(preview);
+      setDetectedRecto(false);
+      setCropHintRecto('');
+    } else {
+      setOriginalVerso(preview);
+      setDetectedVerso(false);
+      setCropHintVerso('');
+    }
+    const q = await assessClientQuality(preview);
+    if (side === 'recto') setQualityRecto(q);
+    else setQualityVerso(q);
+    setGuidedCameraSide(null);
+    // Enchaîner verso après validation du recto si verso manquant
+    if (side === 'recto' && !ocrFullDataUrlRef.current.verso && !ocrFilesRef.current.verso) {
+      setTimeout(() => setGuidedCameraSide('verso'), 280);
+    }
+  }
+
+  function openManualCropFromGuided(dataUrl) {
+    const side = guidedCameraSide === 'verso' ? 'verso' : 'recto';
+    if (!dataUrl) return;
+    set(side === 'recto' ? 'cin_recto' : 'cin_verso', dataUrl);
+    ocrFilesRef.current[side] = dataUrlToCaptureFile(dataUrl, side, 'guided-pre-crop');
+    ocrFullDataUrlRef.current[side] = dataUrl;
+    cinOriginalRef.current[side] = dataUrl;
+    if (side === 'recto') setOriginalRecto(dataUrl);
+    else setOriginalVerso(dataUrl);
+    setGuidedCameraSide(null);
+    setManualCropSide(side);
+  }
+
+  function closeCINScanner() {
+    if (scannerStream) {
+      scannerStream.getTracks().forEach(t => t.stop());
+    }
+    setScannerStream(null);
+    setScannerMode('full');
+    setCaptureSide(null);
+    setShowScanner(false);
+  }
+
+  function handleSideCaptured(side, preview, file, fullDataUrl) {
+    if (side === 'recto') {
+      set('cin_recto', preview);
+      ocrFilesRef.current.recto = file || null;
+      ocrFullDataUrlRef.current.recto = fullDataUrl || null;
+      assessClientQuality(fullDataUrl || preview).then(setQualityRecto);
+    } else {
+      set('cin_verso', preview);
+      ocrFilesRef.current.verso = file || null;
+      ocrFullDataUrlRef.current.verso = fullDataUrl || null;
+      assessClientQuality(fullDataUrl || preview).then(setQualityVerso);
+    }
+    setFormTab('documents');
+  }
+
+  function buildOcrPayload(result) {
+    const raw = result?._ocr_raw || result || {};
+    const { map, meta, normalized } = pickFillableFields(raw);
+    const merged = {
+      cin: map.cin || '',
+      prenom: map.prenom || '',
+      nom: map.nom || '',
+      date_naissance: map.date_naissance || '',
+      ville_naissance: map.ville_naissance || normalized?.lieu_naissance || '',
+      date_expiration: map.date_expiration || '',
+      sexe: map.sexe || '',
+      nationalite: map.nationalite || '',
+      adresse: map.adresse || '',
+      autorite: map.autorite || '',
+    };
+    Object.keys(merged).forEach((k) => {
+      if (!String(merged[k] || '').trim()) delete merged[k];
+    });
+    if (merged.nationalite && (merged.nationalite.length <= 2 || /^[àâäa]$/i.test(merged.nationalite))) {
+      delete merged.nationalite;
+    }
+    const finalMeta = { ...(result?.field_meta || {}), ...meta };
+    console.info('[OCR CHAIN]', 'Résultat extrait → payload formulaire', {
+      keys: Object.keys(merged),
+      engine: result?.engine_used,
+      hasAny: Object.keys(merged).length > 0,
+      confidence_globale: result?.confidence_globale,
+    });
+    return { map: merged, meta: finalMeta, cinCandidates: [], normalized };
+  }
+
+  function fillFormFromOcr(payload, meta, options = {}) {
+    const { partial = false } = options;
+    const cleaned = {};
+    Object.entries(payload || {}).forEach(([k, v]) => {
+      if (v != null && String(v).trim() !== '') cleaned[k] = String(v).trim();
+    });
+
+    if (Object.keys(cleaned).length === 0) {
+      console.warn('[OCR CHAIN]', 'Après remplissage — AUCUNE donnée à injecter');
+      flashOcrToast('Analyse terminée. Certains champs doivent être vérifiés.');
+      return;
+    }
+
+    setForm((prev) => {
+      const conflicts = {};
+      const injected = {};
+      Object.entries(cleaned).forEach(([k, next]) => {
+        const cur = String(prev[k] || '').trim();
+        const isDefaultNat = k === 'nationalite' && /^marocaine$/i.test(cur);
+        if (cur && !isDefaultNat) {
+          if (isRealFieldConflict(k, cur, next, meta)) {
+            conflicts[k] = { current: cur, detected: next };
+          }
+          return;
+        }
+        injected[k] = next;
+      });
+      const merged = { ...prev, ...injected };
+      console.info('[OCR CHAIN]', 'Après remplissage du formulaire', {
+        injected_keys: Object.keys(injected),
+        conflict_keys: Object.keys(conflicts),
+      });
+      if (Object.keys(conflicts).length) {
+        queueMicrotask(() => setFieldConflicts({ conflicts, payload: cleaned, meta }));
+      }
+      return merged;
+    });
+    setOcrFieldMeta(meta || null);
+    setFormTab('identite');
+    setOcrFilled(true);
+    flashOcrToast(partial
+      ? 'Analyse terminée. Certains champs doivent être vérifiés.'
+      : 'CIN analysée avec succès. Vérifiez les informations proposées.');
+    setTimeout(() => setOcrFilled(false), 4000);
+    queueMicrotask(() => {
+      try {
+        const prefer = ['prenom', 'nom', 'cin', 'date_naissance', 'ville_naissance', 'sexe', 'nationalite', 'date_expiration'];
+        const key = prefer.find((k) => cleaned[k]) || Object.keys(cleaned)[0];
+        const el = key
+          ? document.querySelector(`.ouv-modal-body [data-ocr-field="${key}"]`)
+          : null;
+        (el || document.querySelector('.ouv-modal-body input, .ouv-modal-body select'))
+          ?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+      } catch (_) { /* ignore */ }
+    });
+  }
+
+  function resolveConflicts(choices) {
+    if (!fieldConflicts) return;
+    const merged = { ...fieldConflicts.payload };
+    Object.entries(fieldConflicts.conflicts).forEach(([k, v]) => {
+      if (choices[k] === 'keep') merged[k] = v.current;
+      else merged[k] = v.detected;
+    });
+    setFieldConflicts(null);
+    const cleaned = {};
+    Object.entries(merged).forEach(([k, v]) => {
+      if (v != null && String(v).trim() !== '') cleaned[k] = v;
+    });
+    setForm((p) => ({ ...p, ...cleaned }));
+    setOcrFieldMeta(fieldConflicts.meta || null);
+    setFormTab('identite');
+    flashOcrToast('CIN analysée avec succès. Vérifiez les informations proposées.', 'success', 4000);
+  }
+
+  async function handleAnalyzeDocuments(force = forceOcr) {
+    console.info('[OCR CHAIN]', 'Bouton « Analyser la CIN » → handleAnalyzeDocuments', {
+      force,
+      hasRecto: !!form.cin_recto,
+      hasFullRecto: !!ocrFullDataUrlRef.current.recto,
+      hasVerso: !!(ocrFullDataUrlRef.current.verso || form.cin_verso),
+      qualityBlock: !!qualityRecto?.block_ocr,
+    });
+    if (!form.cin_recto && !(ocrFullDataUrlRef.current.verso || form.cin_verso)) {
+      flashOcrToast('Importez au moins le recto ou le verso CIN.', 'error', 4000);
+      return;
+    }
+    if (qualityRecto?.block_ocr && !force && form.cin_recto) {
+      const versoOk = !(qualityVerso?.block_ocr) && (ocrFullDataUrlRef.current.verso || form.cin_verso);
+      if (!versoOk) {
+        console.warn('[OCR CHAIN]', 'Bloqué qualité client (pas encore OCR)');
+        flashOcrToast(getReadableMessage(qualityRecto.messages?.[0], 'Image non lisible'), 'error', 6000);
+        setForceOcr(true);
+        return;
+      }
+    }
+    setOcrAnalyzing(true);
+    setOcrToast('');
+    setOcrToastType('success');
+    setOcrProgress('Analyse…');
+    setCinAmbiguous(null);
+    setFieldConflicts(null);
+    try {
+      console.info('[OCR CHAIN]', 'Appel scanCIN…');
+      const result = await scanCIN(
+        ocrFullDataUrlRef.current.recto || form.cin_recto || null,
+        ocrFullDataUrlRef.current.verso || form.cin_verso || null,
+        { force, onProgress: (s) => setOcrProgress(getReadableMessage(s, 'Analyse…')) },
+      );
+      console.info('[OCR CHAIN]', 'Retour scanCIN', {
+        engine: result?.engine_used,
+        ok: result?.ok,
+        success: result?.success,
+        confidence: result?.confidence_globale,
+        filled_keys: ['cin', 'prenom', 'nom', 'date_naissance', 'ville_naissance', 'sexe', 'nationalite', 'date_expiration']
+          .filter((k) => result?.[k]),
+        ms: result?.duration_ms,
+      });
+      lastOcrMetaRef.current = {
+        confirmed_at: new Date().toISOString(),
+        engine: result?.engine_used,
+        models: result?.models_used,
+        confidence: result?.confidence_globale,
+      };
+      const { map, meta, cinCandidates } = buildOcrPayload(result);
+      if (!map.cin && cinCandidates.length > 1) {
+        setCinAmbiguous(cinCandidates);
+      }
+      const partial = !!result?._ocr_partial || Object.keys(map).length < 4;
+      fillFormFromOcr(map, meta, { partial });
+      setForceOcr(false);
+      if (workers?.length) syncOcrLearning(workers);
+    } catch (err) {
+      console.error('[OCR CHAIN]', 'handleAnalyzeDocuments CATCH', err?.code, getReadableMessage(err));
+      if (err?.code === 'IMAGE_UNREADABLE' && err?.allow_force) {
+        setForceOcr(true);
+        flashOcrToast(getReadableMessage(err, 'Image non lisible') + ' — vous pouvez analyser quand même. Le formulaire reste éditable.', 'error', 8000);
+      } else {
+        flashOcrToast(getReadableMessage(err, 'Extraction impossible — saisissez les champs manuellement. Les images restent sélectionnées.'), 'error', 8000);
+      }
+    } finally {
+      setOcrAnalyzing(false);
+      setOcrProgress('');
+    }
+  }
+
+  function findDuplicateWorker() {
+    const cin = String(form.cin || '').replace(/\s/g, '').toUpperCase();
+    const tel = String(form.telephone || '').replace(/\D/g, '');
+    const nom = String(form.nom || '').trim().toLowerCase();
+    const prenom = String(form.prenom || '').trim().toLowerCase();
+    const dn = String(form.date_naissance || '');
+    return (workers || []).find((w) => {
+      if (isEdit && w.id === worker?.id) return false;
+      const wCin = String(w.cin || '').replace(/\s/g, '').toUpperCase();
+      if (cin && wCin && cin === wCin) return true;
+      const wTel = String(w.telephone || '').replace(/\D/g, '');
+      if (tel && wTel && tel.length >= 9 && tel === wTel) return true;
+      if (
+        nom && prenom && dn
+        && String(w.nom || '').trim().toLowerCase() === nom
+        && String(w.prenom || '').trim().toLowerCase() === prenom
+        && String(w.date_naissance || '') === dn
+      ) return true;
+      return false;
+    }) || null;
+  }
+
+  function validate() {
+    const e = {};
+    if (!form.prenom.trim()) e.prenom = 'Requis';
+    if (!form.nom.trim())    e.nom    = 'Requis';
+    if (!form.cin.trim())    e.cin    = 'Requis';
+    if (!form.tarif || isNaN(Number(form.tarif))) e.tarif = 'Montant valide requis';
+    return e;
+  }
+
+  async function handleSubmit(ev) {
+    ev.preventDefault();
+    const errs = validate();
+    if (Object.keys(errs).length) { setErrors(errs); setFormTab('identite'); return; }
+    const dup = findDuplicateWorker();
+    if (dup) {
+      setDuplicateHit(dup);
+      return;
+    }
+    const result = await onSave({
+      ...form,
+      tarif: Number(form.tarif),
+      tarif_unite: 'jour',
+      experience: String(experienceToStars(form.experience)),
+      _ocr_meta: lastOcrMetaRef.current,
+    }, isEdit);
+    if (result?.success) onClose();
+  }
+
+  return (
+    <>
+      {fieldConflicts && (
+        <div className="cin-verify-overlay" role="dialog" aria-modal="true">
+          <div className="cin-verify-box" style={{ maxWidth: 480 }}>
+            <h2>Nouvelle carte scannée</h2>
+            <p className="cin-verify-sub">
+              Le formulaire contient déjà des valeurs. Les valeurs « Issues du scan » viennent uniquement
+              de la carte analysée maintenant (aucune donnée d’une autre carte n’est réutilisée).
+            </p>
+            {Object.entries(fieldConflicts.conflicts).map(([k, v]) => (
+              <div key={k} className="cin-conflict-row">
+                <strong>{k}</strong>
+                <div>Dans le formulaire : {v.current}</div>
+                <div>Issues du scan : {v.detected}</div>
+                <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                  <button type="button" className="btn btn-ghost btn-sm" onClick={() => resolveConflicts({ [k]: 'keep', ...Object.fromEntries(Object.keys(fieldConflicts.conflicts).filter((x) => x !== k).map((x) => [x, 'use'])) })}>
+                    Conserver le formulaire
+                  </button>
+                  <button type="button" className="btn btn-primary btn-sm" onClick={() => resolveConflicts({ [k]: 'use', ...Object.fromEntries(Object.keys(fieldConflicts.conflicts).filter((x) => x !== k).map((x) => [x, 'keep'])) })}>
+                    Utiliser le scan
+                  </button>
+                </div>
+              </div>
+            ))}
+            <div className="cin-verify-footer">
+              <button type="button" className="btn btn-ghost" onClick={() => setFieldConflicts(null)}>Annuler</button>
+              {Object.keys(fieldConflicts.conflicts).length >= 2 && (
+                <button type="button" className="btn btn-primary" onClick={() => {
+                  const all = {};
+                  Object.keys(fieldConflicts.conflicts).forEach((k) => { all[k] = 'use'; });
+                  resolveConflicts(all);
+                }}>
+                  Utiliser tout le scan
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {duplicateHit && (
+        <div className="cin-verify-overlay" role="dialog" aria-modal="true">
+          <div className="cin-verify-box" style={{ maxWidth: 420 }}>
+            <h2>Ouvrier déjà existant</h2>
+            <p>
+              Un ouvrier avec ce numéro de CIN existe déjà
+              {duplicateHit.prenom ? ` (${duplicateHit.prenom} ${duplicateHit.nom})` : ''}.
+            </p>
+            <div className="cin-verify-footer">
+              <button type="button" className="btn btn-ghost" onClick={() => setDuplicateHit(null)}>Annuler</button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => {
+                  const w = duplicateHit;
+                  setDuplicateHit(null);
+                  onClose();
+                  onOpenExisting?.(w);
+                }}
+              >
+                Ouvrir la fiche existante
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showScanner && (
+        <CINScanner
+          mode={scannerMode}
+          captureSide={captureSide}
+          onCaptureOnly={handleSideCaptured}
+          onExtracted={(result) => {
+            const { map, meta, cinCandidates } = buildOcrPayload(result);
+            if (!map.cin && cinCandidates.length > 1) setCinAmbiguous(cinCandidates);
+            fillFormFromOcr(map, meta);
+          }}
+          onClose={closeCINScanner}
+          initialStream={scannerStream}
+          initialRecto={form.cin_recto}
+          initialVerso={form.cin_verso}
+        />
+      )}
+
+      <CINManualCropModal
+        open={Boolean(manualCropSide)}
+        side={manualCropSide || 'recto'}
+        imageDataUrl={
+          manualCropSide === 'verso'
+            ? (originalVerso || form.cin_verso)
+            : (originalRecto || form.cin_recto)
+        }
+        onCancel={() => setManualCropSide(null)}
+        onValidate={(result) => applyManualCrop(manualCropSide, result)}
+      />
+
+      <CINGuidedCamera
+        open={Boolean(guidedCameraSide)}
+        side={guidedCameraSide || 'recto'}
+        onClose={() => setGuidedCameraSide(null)}
+        onValidated={applyGuidedCapture}
+        onOpenManualCrop={openManualCropFromGuided}
+      />
+
+      {/* OCR success toast */}
+      {ocrToast && (
+        <div className={'ocr-toast' + (ocrToastType === 'error' ? ' ocr-toast--error' : '')}>
+          {ocrToastType === 'error'
+            ? <AlertCircle size={14} style={{ flexShrink: 0 }} />
+            : <CheckCircle size={14} style={{ flexShrink: 0 }} />}
+          {getReadableMessage(ocrToast, 'Notification OCR')}
+        </div>
+      )}
+
+      <div className="ouv-modal-overlay">
+        <div className="ouv-modal-box">
+          {/* Modal header */}
+          <div className="ouv-modal-header">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0, flex: 1 }}>
+              <button type="button" className="rh-ext-back-btn" onClick={onClose} aria-label="Retour aux ouvriers">
+                ← Retour aux ouvriers
+              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <div style={{ width: 36, height: 36, borderRadius: 8, background: '#FFEBEE', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <HardHat size={18} style={{ color: 'var(--red)' }} />
+                </div>
+                <div>
+                  <div style={{ fontFamily: 'var(--font-head)', fontWeight: 800, fontSize: '1.05rem', textTransform: 'uppercase' }}>
+                    {isEdit ? 'Modifier ouvrier' : 'Ajouter un ouvrier'}
+                  </div>
+                  {isEdit && <div style={{ fontSize: '0.72rem', color: 'var(--text-3)' }}>{form.prenom} {form.nom}</div>}
+                </div>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+              <button type="button" className="btn btn-ghost btn-sm" onClick={openCINScanner} style={{ display: 'flex', alignItems: 'center', gap: 5, color: 'var(--red)' }}>
+                <ScanLine size={13} /> <span className="ouv-scanner-label">Scan CIN</span>
+              </button>
+              <button type="button" onClick={onClose} aria-label="Fermer" style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-3)', padding: 4, minWidth: 44, minHeight: 44 }}><X size={20} /></button>
+            </div>
+          </div>
+
+          {/* Form tabs */}
+          <div className="ouv-modal-tabs">
+            {formTabs.map(t => (
+              <button key={t.id} type="button" onClick={() => setFormTab(t.id)} className={'ouv-tab-btn' + (formTab === t.id ? ' active' : '')}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          <form onSubmit={handleSubmit} style={{ overflowY: 'auto', flex: 1 }}>
+            <div className="ouv-modal-body">
+
+              {/* ── TAB: IDENTITE ── */}
+              {formTab === 'identite' && (
+                <div className="ouv-identite-grid">
+                  {/* Photo */}
+                  <PhotoUpload value={form.photo} onChange={v => set('photo', v)} label="Photo" />
+
+                  <div className="ouv-fields-grid">
+                    <div className="form-group">
+                      <Label required>Prenom</Label>
+                      <input data-ocr-field="prenom" value={form.prenom} onChange={e => set('prenom', e.target.value)} style={IS(errors.prenom, ocrFilled && form.prenom ? { borderColor: '#43A047', background: '#F1F8E9' } : {})} />
+                      <OcrConfBadge meta={ocrFieldMeta?.prenom} />
+                      {errors.prenom && <span style={{ color: 'var(--red)', fontSize: '0.75rem' }}>{errors.prenom}</span>}
+                    </div>
+                    <div className="form-group">
+                      <Label required>Nom</Label>
+                      <input data-ocr-field="nom" value={form.nom} onChange={e => set('nom', e.target.value)} style={IS(errors.nom, ocrFilled && form.nom ? { borderColor: '#43A047', background: '#F1F8E9' } : {})} />
+                      <OcrConfBadge meta={ocrFieldMeta?.nom} />
+                      {errors.nom && <span style={{ color: 'var(--red)', fontSize: '0.75rem' }}>{errors.nom}</span>}
+                    </div>
+                    <div className="form-group">
+                      <Label required>CIN</Label>
+                      <input data-ocr-field="cin" value={form.cin} onChange={e => set('cin', e.target.value.toUpperCase())} placeholder="AB123456" style={IS(errors.cin, ocrFilled && form.cin ? { borderColor: '#43A047', background: '#F1F8E9' } : {})} />
+                      <OcrConfBadge meta={ocrFieldMeta?.cin} />
+                      {cinAmbiguous?.length > 0 && (
+                        <div className="cin-verify-cands" style={{ marginTop: 6 }}>
+                          {cinAmbiguous.map((c) => (
+                            <button key={c} type="button" className="btn btn-ghost btn-sm" onClick={() => { set('cin', c); setCinAmbiguous(null); }}>
+                              {c}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      {errors.cin && <span style={{ color: 'var(--red)', fontSize: '0.75rem' }}>{errors.cin}</span>}
+                    </div>
+                    <div className="form-group">
+                      <Label>Telephone</Label>
+                      <input value={form.telephone} onChange={e => set('telephone', e.target.value)} placeholder="+212 600 000 000" style={IS(false)} />
+                    </div>
+                    <div className="form-group">
+                      <Label>Date de naissance</Label>
+                      <input data-ocr-field="date_naissance" type="date" value={form.date_naissance} onChange={e => set('date_naissance', e.target.value)} style={IS(false, ocrFilled && form.date_naissance ? { borderColor: '#43A047', background: '#F1F8E9' } : {})} />
+                      <OcrConfBadge meta={ocrFieldMeta?.date_naissance} />
+                    </div>
+                    <div className="form-group">
+                      <Label>Lieu de naissance</Label>
+                      <input data-ocr-field="ville_naissance" value={form.ville_naissance} onChange={e => set('ville_naissance', e.target.value)} placeholder="Ville" style={IS(false, ocrFilled && form.ville_naissance ? { borderColor: '#43A047', background: '#F1F8E9' } : {})} />
+                      <OcrConfBadge meta={ocrFieldMeta?.ville_naissance} />
+                    </div>
+                    <div className="form-group">
+                      <Label>Sexe</Label>
+                      <select data-ocr-field="sexe" value={form.sexe} onChange={e => set('sexe', e.target.value)} style={IS(false, ocrFilled && form.sexe ? { borderColor: '#43A047', background: '#F1F8E9' } : {})}>
+                        <option value="">—</option>
+                        <option value="M">Masculin</option>
+                        <option value="F">Féminin</option>
+                      </select>
+                      <OcrConfBadge meta={ocrFieldMeta?.sexe} />
+                    </div>
+                    <div className="form-group">
+                      <Label>Nationalité</Label>
+                      <input data-ocr-field="nationalite" value={form.nationalite} onChange={e => set('nationalite', e.target.value)} style={IS(false, ocrFilled && form.nationalite ? { borderColor: '#43A047', background: '#F1F8E9' } : {})} />
+                      <OcrConfBadge meta={ocrFieldMeta?.nationalite} />
+                    </div>
+                    <div className="form-group">
+                      <Label>Expiration CIN</Label>
+                      <input data-ocr-field="date_expiration" type="date" value={form.date_expiration} onChange={e => set('date_expiration', e.target.value)} style={IS(false, ocrFilled && form.date_expiration ? { borderColor: '#43A047', background: '#F1F8E9' } : {})} />
+                      <OcrConfBadge meta={ocrFieldMeta?.date_expiration} />
+                    </div>
+                    <div className="form-group">
+                      <Label>Autorité</Label>
+                      <input data-ocr-field="autorite" value={form.autorite || ''} onChange={e => set('autorite', e.target.value)} placeholder="Si présente sur la CIN" style={IS(false, ocrFilled && form.autorite ? { borderColor: '#43A047', background: '#F1F8E9' } : {})} />
+                      <OcrConfBadge meta={ocrFieldMeta?.autorite} />
+                    </div>
+                    <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                      <Label>Adresse</Label>
+                      <input data-ocr-field="adresse" value={form.adresse} onChange={e => set('adresse', e.target.value)} style={IS(false, ocrFilled && form.adresse ? { borderColor: '#43A047', background: '#F1F8E9' } : {})} />
+                      <OcrConfBadge meta={ocrFieldMeta?.adresse} />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ── TAB: CHANTIER ── */}
+              {formTab === 'chantier' && (
+                <div className="ouv-fields-grid">
+                  <div className="form-group">
+                    <Label required>Fonction</Label>
+                    <select value={form.fonction} onChange={e => set('fonction', e.target.value)} style={IS(false)}>
+                      <option value="">Choisir...</option>
+                      {FONCTIONS.map(f => <option key={f} value={f}>{f}</option>)}
+                    </select>
+                  </div>
+                  <div className="form-group">
+                    <Label required>Tarif journalier (MAD/j)</Label>
+                    <input type="number" min="0" step="0.01" value={form.tarif} onChange={e => set('tarif', e.target.value)} placeholder="120.00" style={IS(errors.tarif)} />
+                    {errors.tarif && <span style={{ color: 'var(--red)', fontSize: '0.75rem' }}>{errors.tarif}</span>}
+                  </div>
+                  <div className="form-group">
+                    <Label>Niveau d'experience</Label>
+                    <div className="ouv-star-rating" role="group" aria-label="Niveau d'experience de 1 a 5">
+                      {[1, 2, 3, 4, 5].map((n) => {
+                        const active = experienceToStars(form.experience) >= n;
+                        return (
+                          <button
+                            key={n}
+                            type="button"
+                            className={'ouv-star-btn' + (active ? ' active' : '')}
+                            onClick={() => set('experience', String(n))}
+                            aria-label={`${n} etoile${n > 1 ? 's' : ''}`}
+                            aria-pressed={active}
+                          >
+                            <Star size={22} fill={active ? 'currentColor' : 'none'} />
+                          </button>
+                        );
+                      })}
+                      <span className="ouv-star-label">{experienceToStars(form.experience)}/5</span>
+                    </div>
+                  </div>
+                  <div className="form-group">
+                    <Label>Date de première intervention</Label>
+                    <input type="date" value={form.date_recrutement} onChange={e => set('date_recrutement', e.target.value)} style={IS(false)} />
+                  </div>
+                  <div className="form-group">
+                    <Label>Statut</Label>
+                    <select value={form.statut} onChange={e => set('statut', e.target.value)} style={IS(false)}>
+                      {Object.entries(STATUT_CFG).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+                    </select>
+                  </div>
+                </div>
+              )}
+
+              {/* ── TAB: SECURITE ── */}
+              {formTab === 'securite' && (
+                <div className="ouv-fields-grid">
+                  <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                    <Label>Nom contact urgence</Label>
+                    <input value={form.contact_urgence} onChange={e => set('contact_urgence', e.target.value)} placeholder="Prenom Nom..." style={IS(false)} />
+                  </div>
+                  <div className="form-group">
+                    <Label>Telephone urgence</Label>
+                    <input value={form.tel_urgence} onChange={e => set('tel_urgence', e.target.value)} placeholder="+212 600..." style={IS(false)} />
+                  </div>
+                  <div className="form-group">
+                    <Label>Relation</Label>
+                    <select value={form.relation_urgence} onChange={e => set('relation_urgence', e.target.value)} style={IS(false)}>
+                      <option value="">Choisir...</option>
+                      <option value="conjoint">Conjoint(e)</option>
+                      <option value="parent">Parent</option>
+                      <option value="frere_soeur">Frere / Soeur</option>
+                      <option value="ami">Ami(e)</option>
+                      <option value="autre">Autre</option>
+                    </select>
+                  </div>
+                </div>
+              )}
+
+              {/* ── TAB: DOCUMENTS ── */}
+              {formTab === 'documents' && (
+                <div className="ouv-fields-grid">
+                  <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                    <Label>Scan CIN marocaine</Label>
+                    <p style={{ margin: '0 0 10px', fontSize: '0.78rem', color: 'var(--text-3)' }}>
+                      Photographiez le recto et le verso dans le cadre CNIE (ou importez depuis la galerie). Vérifiez puis analysez — aucune sauvegarde automatique.
+                    </p>
+                  </div>
+                  <div className="form-group">
+                    <Label>CIN Recto</Label>
+                    <CINDocZone
+                      side="recto"
+                      value={form.cin_recto}
+                      quality={qualityRecto}
+                      cropHint={cropHintRecto}
+                      detected={detectedRecto}
+                      originalDataUrl={originalRecto}
+                      onUseOriginal={() => applyCinOriginal('recto')}
+                      onOpenManualCrop={() => setManualCropSide('recto')}
+                      onOpenCamera={() => setGuidedCameraSide('recto')}
+                      onChange={(preview, file) => handleCINDocImport('recto', preview, file)}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <Label>CIN Verso</Label>
+                    <CINDocZone
+                      side="verso"
+                      value={form.cin_verso}
+                      quality={qualityVerso}
+                      cropHint={cropHintVerso}
+                      detected={detectedVerso}
+                      originalDataUrl={originalVerso}
+                      onUseOriginal={() => applyCinOriginal('verso')}
+                      onOpenManualCrop={() => setManualCropSide('verso')}
+                      onOpenCamera={() => setGuidedCameraSide('verso')}
+                      onChange={(preview, file) => handleCINDocImport('verso', preview, file)}
+                    />
+                  </div>
+                  <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                    {ocrAnalyzing && ocrProgress && (
+                      <div className="cin-ocr-progress">{ocrProgress}</div>
+                    )}
+                    <button
+                      type="button"
+                      className="btn btn-primary cin-doc-analyze-btn"
+                      disabled={ocrAnalyzing || (!form.cin_recto && !form.cin_verso)}
+                      onClick={() => handleAnalyzeDocuments(forceOcr)}
+                    >
+                      {ocrAnalyzing
+                        ? <><Loader size={15} className="cin-spin" /> {ocrProgress || 'Analyse…'}</>
+                        : <><ScanLine size={15} /> Analyser la CIN</>}
+                    </button>
+                    {forceOcr && !ocrAnalyzing && (
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        style={{ marginTop: 8 }}
+                        onClick={() => handleAnalyzeDocuments(true)}
+                      >
+                        Analyser quand même
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* ── TAB: EQUIPEMENTS ── */}
+              {formTab === 'equipements' && (
+                <div className="ouv-fields-grid">
+                  <div className="form-group">
+                    <Label>Pointure</Label>
+                    <select value={form.pointure} onChange={e => set('pointure', e.target.value)} style={IS(false)}>
+                      <option value="">Choisir...</option>
+                      {POINTURES.map(p => <option key={p} value={p}>{p}</option>)}
+                    </select>
+                  </div>
+                  <div className="form-group">
+                    <Label>Taille vetement</Label>
+                    <select value={form.taille_vetement} onChange={e => set('taille_vetement', e.target.value)} style={IS(false)}>
+                      <option value="">Choisir...</option>
+                      {TAILLES_VET.map(t => <option key={t} value={t}>{t}</option>)}
+                    </select>
+                  </div>
+                  <div className="form-group">
+                    <Label>Taille gants</Label>
+                    <select value={form.taille_gants} onChange={e => set('taille_gants', e.target.value)} style={IS(false)}>
+                      <option value="">Choisir...</option>
+                      {['S', 'M', 'L', 'XL', 'XXL'].map(t => <option key={t} value={t}>{t}</option>)}
+                    </select>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="ouv-modal-footer">
+              <div style={{ display: 'flex', gap: 8 }}>
+                {formTabs.map((t, i) => (
+                  <div key={t.id} style={{ width: 8, height: 8, borderRadius: '50%', background: formTab === t.id ? 'var(--red)' : 'var(--border)', transition: 'background 0.15s', cursor: 'pointer' }} onClick={() => setFormTab(t.id)} />
+                ))}
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button type="button" className="btn btn-ghost" onClick={onClose}>Annuler</button>
+                <button type="submit" className="btn btn-primary" disabled={saving} style={{ minWidth: 120 }}>
+                  {saving ? <div style={{ width: 14, height: 14, border: '2px solid rgba(255,255,255,0.4)', borderTopColor: '#fff', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} /> : <><Plus size={14} /> {isEdit ? 'Enregistrer' : 'Ajouter'}</>}
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
+      </div>
+    </>
+  );
+}
+
+/* ══════════════════════════════════════════════════════
+   OUVRIERS LISTE — MAIN COMPONENT
+   ══════════════════════════════════════════════════════ */
+export default function OuvriersListe({ onWorkersChange }) {
+  const {
+    workers,
+    loading,
+    saving,
+    error,
+    create,
+    update,
+    remove,
+  } = useWorkers();
+
+  const [view, setView]             = useState('list'); // 'list' | 'detail'
+  const [detailWorker, setDetail]   = useState(null);
+  const [search, setSearch]         = useState('');
+  const [filterStatut, setFStatut]  = useState('');
+  const [filterFonction, setFFonc]  = useState('');
+  const [sortField, setSortField]   = useState('nom');
+  const [sortDir, setSortDir]       = useState('asc');
+  const [showModal, setShowModal]   = useState(false);
+  const [editWorker, setEditWorker] = useState(null);
+  const [toast, setToast]           = useState(null);
+  const [pdfLoadingId, setPdfLoadingId] = useState(null);
+  const toastRef                    = useRef(null);
+
+  useEffect(() => {
+    if (workers?.length) syncOcrLearning(workers);
+  }, [workers]);
+
+  function notify(type, msg) {
+    clearTimeout(toastRef.current);
+    setToast({ type, msg });
+    toastRef.current = setTimeout(() => setToast(null), 3500);
+  }
+
+  async function handleDownloadPdf(worker) {
+    setPdfLoadingId(worker.id);
+    try {
+      await generateWorkerPdf(worker);
+      notify('success', `Fiche PDF téléchargée — ${worker.prenom} ${worker.nom}`);
+    } catch (err) {
+      console.error('[CITYMO] PDF ouvrier', err);
+      notify('error', 'Erreur lors de la génération PDF.');
+    } finally {
+      setPdfLoadingId(null);
+    }
+  }
+
+  useEffect(() => {
+    if (onWorkersChange) onWorkersChange(workers);
+  }, [workers, onWorkersChange]);
+
+  useEffect(() => {
+    if (error) notify('error', error);
+  }, [error]);
+
+  useEffect(() => {
+    if (!detailWorker) return;
+    const fresh = workers.find((w) => w.id === detailWorker.id);
+    if (fresh) setDetail(fresh);
+  }, [workers, detailWorker?.id]);
+
+  function openAdd()    { setEditWorker(null); setShowModal(true); }
+  function openEdit(w)  { setEditWorker(w);    setShowModal(true); }
+
+  async function handleSave(form, isEdit) {
+    const result = isEdit ? await update(form.id, form) : await create(form);
+    if (result.success) {
+      notify('success', isEdit ? 'Ouvrier modifie avec succes.' : 'Ouvrier ajoute avec succes.');
+    } else {
+      notify('error', result.error || 'Erreur enregistrement.');
+    }
+    return result;
+  }
+
+  async function del(id) {
+    if (!window.confirm('Supprimer cet ouvrier ?')) return;
+    const result = await remove(id);
+    if (result.success) {
+      if (detailWorker?.id === id) { setView('list'); setDetail(null); }
+      notify('success', 'Ouvrier supprime.');
+    } else {
+      notify('error', result.error || 'Erreur suppression.');
+    }
+  }
+
+  function toggleSort(field) {
+    if (sortField === field) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortField(field); setSortDir('asc'); }
+  }
+
+  const fonctions = [...new Set(workers.map(w => w.fonction).filter(Boolean))];
+
+  const filtered = workers.filter(w => {
+    const q = search.toLowerCase();
+    const matchSearch = !q || (w.prenom + ' ' + w.nom).toLowerCase().includes(q) || (w.cin || '').toLowerCase().includes(q) || (w.fonction || '').toLowerCase().includes(q);
+    const matchStatut  = !filterStatut   || w.statut   === filterStatut;
+    const matchFonction = !filterFonction || w.fonction === filterFonction;
+    return matchSearch && matchStatut && matchFonction;
+  }).sort((a, b) => {
+    let va = a[sortField] ?? '';
+    let vb = b[sortField] ?? '';
+    if (sortField === 'tarif') { va = Number(va); vb = Number(vb); }
+    if (va < vb) return sortDir === 'asc' ? -1 : 1;
+    if (va > vb) return sortDir === 'asc' ? 1 : -1;
+    return 0;
+  });
+
+  /* KPIs */
+  const nTotal        = workers.length;
+  const nEnChantier   = workers.filter(w => w.statut === 'en_chantier').length;
+  const nDisponibles  = workers.filter(w => w.statut === 'disponible' || (w.statut === 'actif' && w.disponibilite === 'oui')).length;
+  const tarifMoyen    = workers.length > 0
+    ? Math.round(workers.reduce((s, w) => s + workerTarifJournalier(w), 0) / workers.length)
+    : 0;
+
+  /* Detail view */
+  if (view === 'detail' && detailWorker) {
+    return (
+      <>
+        <Toast toast={toast} />
+        <OuvrierDetail
+          worker={detailWorker}
+          onBack={() => { setView('list'); setDetail(null); }}
+          onEdit={w => { setEditWorker(w); setShowModal(true); }}
+          onDownloadPdf={handleDownloadPdf}
+          pdfLoading={pdfLoadingId === detailWorker.id}
+        />
+        {showModal && (
+          <OuvrierModal
+            worker={editWorker}
+            onClose={() => setShowModal(false)}
+            onSave={handleSave}
+            saving={saving}
+            workers={workers}
+            onOpenExisting={(w) => { setDetail(w); setView('detail'); setShowModal(false); }}
+          />
+        )}
+      </>
+    );
+  }
+
+  return (
+    <div className="animate-fade-in rh-ext-page">
+      <Toast toast={toast} />
+
+      {showModal && (
+        <OuvrierModal
+          worker={editWorker}
+          onClose={() => setShowModal(false)}
+          onSave={handleSave}
+          saving={saving}
+          workers={workers}
+          onOpenExisting={(w) => { setDetail(w); setView('detail'); setShowModal(false); }}
+        />
+      )}
+
+      {/* Header */}
+      <div className="page-header flex-between finance-page-header">
+        <div>
+          <h1 className="page-title">Ouvriers externes</h1>
+          <p className="page-subtitle"><span className="finance-sub-hide-mobile">Gestion du personnel de chantier externe — </span>{nTotal} ouvrier{nTotal > 1 ? 's' : ''}</p>
+        </div>
+        <div className="finance-page-actions finance-page-actions--solo">
+          <button className="btn btn-primary" onClick={openAdd} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Plus size={15} /> Ajouter un ouvrier
+          </button>
+        </div>
+      </div>
+
+      <div className="stats-grid finance-kpi-strip rh-ext-stat-grid">
+        <div className="stat-card">
+          <div className="stat-icon" style={{ background: '#FFEBEE', color: 'var(--red)' }}><HardHat size={20} /></div>
+          <div className="stat-body"><div className="stat-value">{nTotal}</div><div className="stat-label">Total ouvriers</div></div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-icon" style={{ background: '#E3F2FD', color: '#1976D2' }}><HardHat size={20} /></div>
+          <div className="stat-body"><div className="stat-value">{nEnChantier}</div><div className="stat-label">En chantier</div></div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-icon" style={{ background: '#E8F5E9', color: '#388E3C' }}><CheckCircle size={20} /></div>
+          <div className="stat-body"><div className="stat-value">{nDisponibles}</div><div className="stat-label">Disponibles</div></div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-icon" style={{ background: '#F3E5F5', color: '#7B1FA2' }}><HardHat size={20} /></div>
+          <div className="stat-body"><div className="stat-value">{fonctions.length}</div><div className="stat-label">Corps de metiers</div></div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-icon" style={{ background: '#FFF3E0', color: '#E65100' }}><Clock size={20} /></div>
+          <div className="stat-body"><div className="stat-value">{fmtTarifJour(tarifMoyen)}</div><div className="stat-label">Tarif moyen/j</div></div>
+        </div>
+      </div>
+
+      {/* Filter bar */}
+      <div className="card ouv-filter-card">
+        <div className="ouv-filter-bar">
+          <div className="ouv-search-wrap">
+            <Search size={14} className="ouv-search-icon" />
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Nom, CIN, fonction..."
+              className="ouv-search-input" />
+          </div>
+          <select value={filterStatut} onChange={e => setFStatut(e.target.value)} className="ouv-filter-select">
+            <option value="">Tous statuts</option>
+            {Object.entries(STATUT_CFG).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+          </select>
+          <select value={filterFonction} onChange={e => setFFonc(e.target.value)} className="ouv-filter-select">
+            <option value="">Toutes fonctions</option>
+            {fonctions.map(f => <option key={f} value={f}>{f}</option>)}
+          </select>
+          {(search || filterStatut || filterFonction) && (
+            <button className="btn btn-ghost btn-sm ouv-filter-clear" onClick={() => { setSearch(''); setFStatut(''); setFFonc(''); }}>
+              <X size={13} /> Effacer
+            </button>
+          )}
+          <div className="ouv-filter-count">{filtered.length} ouvrier{filtered.length > 1 ? 's' : ''}</div>
+        </div>
+      </div>
+
+      {/* Table */}
+      <div className="card" style={{ padding: 0 }}>
+        {loading ? (
+          <div style={{ textAlign: 'center', padding: '48px 0', color: 'var(--text-3)' }}>
+            <Loader size={24} style={{ animation: 'spin 0.8s linear infinite', marginBottom: 8 }} />
+            <div style={{ fontSize: '0.85rem' }}>Chargement des ouvriers...</div>
+          </div>
+        ) : filtered.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '50px 20px' }}>
+            <HardHat size={40} style={{ color: 'var(--border)', marginBottom: 12 }} />
+            <p style={{ color: 'var(--text-3)', fontSize: '0.875rem' }}>{workers.length === 0 ? 'Aucun ouvrier enregistre.' : 'Aucun resultat.'}</p>
+          </div>
+        ) : (
+          <>
+          <div className="rh-ext-desktop-only">
+          <div className="table-wrap">
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+              <thead>
+                <tr style={{ borderBottom: '1.5px solid var(--border)', background: 'var(--bg)' }}>
+                  {[
+                    { label: 'Ouvrier',     field: 'nom' },
+                    { label: 'CIN',         field: 'cin' },
+                    { label: 'Telephone',   field: 'telephone' },
+                    { label: 'Fonction',    field: 'fonction' },
+                    { label: 'Tarif/j',  field: 'tarif', align: 'right' },
+                    { label: 'Statut',      field: 'statut' },
+                    { label: 'Actions',     field: null },
+                  ].map(col => (
+                    <th key={col.label} onClick={col.field ? () => toggleSort(col.field) : undefined}
+                      style={{ padding: '10px 12px', textAlign: col.align || 'left', fontWeight: 700, fontSize: '0.72rem', textTransform: 'uppercase', color: 'var(--text-3)', letterSpacing: '0.06em', whiteSpace: 'nowrap', cursor: col.field ? 'pointer' : 'default', userSelect: 'none' }}>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                        {col.label}
+                        {col.field && <ArrowUpDown size={11} style={{ opacity: sortField === col.field ? 1 : 0.35 }} />}
+                      </span>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map(w => {
+                  const cfg = STATUT_CFG[w.statut] || STATUT_CFG.actif;
+                  return (
+                    <tr key={w.id} style={{ borderBottom: '1px solid var(--border)', transition: 'background 0.12s', cursor: 'pointer' }}
+                      onMouseEnter={e => e.currentTarget.style.background = 'var(--bg)'}
+                      onMouseLeave={e => e.currentTarget.style.background = ''}>
+
+                      {/* Ouvrier */}
+                      <td data-label="Ouvrier" style={{ padding: '10px 12px' }} onClick={() => { setDetail(w); setView('detail'); }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                          <Avatar worker={w} size={34} />
+                          <div>
+                            <div style={{ fontWeight: 700, color: 'var(--text)', fontSize: '0.88rem' }}>{w.prenom} {w.nom}</div>
+                            {w.date_recrutement && <div style={{ fontSize: '0.72rem', color: 'var(--text-3)' }}>1ère interv. {fmtDate(w.date_recrutement)}</div>}
+                          </div>
+                        </div>
+                      </td>
+
+                      {/* CIN */}
+                      <td data-label="CIN" style={{ padding: '10px 12px' }}>
+                        <span style={{ fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: '0.85rem', letterSpacing: '0.04em', color: 'var(--text-2)', display: 'flex', alignItems: 'center', gap: 5 }}>
+                          {w.cin_recto ? <CheckCircle size={11} style={{ color: '#388E3C' }} /> : null}
+                          {w.cin || '—'}
+                        </span>
+                      </td>
+                      <td data-label="Tel" style={{ padding: '10px 12px', color: 'var(--text-2)', fontSize: '0.82rem', whiteSpace: 'nowrap' }}>{w.telephone || '—'}</td>
+
+                      {/* Fonction */}
+                      <td data-label="Fonction" style={{ padding: '10px 12px' }}><span className="badge badge-blue">{w.fonction || '—'}</span></td>
+
+                      {/* Tarif */}
+                      <td data-label="Tarif/j" style={{ padding: '10px 12px', textAlign: 'right', fontFamily: 'var(--font-head)', fontWeight: 800, color: 'var(--red)', whiteSpace: 'nowrap' }}>
+                        {fmtTarifJour(workerTarifJournalier(w))}
+                      </td>
+
+                      {/* Statut */}
+                      <td data-label="Statut" style={{ padding: '10px 12px' }}><span className={'badge ' + cfg.cls}>{cfg.label}</span></td>
+
+                      {/* Actions */}
+                      <td className="rh-ext-actions-cell" style={{ padding: '10px 10px', whiteSpace: 'nowrap' }}>
+                        <div className="rh-ext-actions">
+                          <button title="Voir fiche" className="btn btn-ghost btn-sm" style={{ padding: '4px 7px' }} onClick={() => { setDetail(w); setView('detail'); }}><Eye size={13} /></button>
+                          <button title="Modifier" className="btn btn-ghost btn-sm" style={{ padding: '4px 7px' }} onClick={() => openEdit(w)}><Edit2 size={13} /></button>
+                          <button title="Télécharger fiche" className="btn btn-ghost btn-sm" style={{ padding: '4px 7px' }}
+                            disabled={pdfLoadingId === w.id}
+                            onClick={(e) => { e.stopPropagation(); handleDownloadPdf(w); }}>
+                            {pdfLoadingId === w.id ? <Loader size={13} style={{ animation: 'spin 0.8s linear infinite' }} /> : <Download size={13} />}
+                          </button>
+                          <button title="Supprimer" className="btn btn-ghost btn-sm" style={{ padding: '4px 7px', color: 'var(--red)' }} onClick={() => del(w.id)}><Trash2 size={13} /></button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          </div>
+
+          <div className="rh-ext-mobile-only rh-ext-mobile-list">
+            {filtered.map(w => {
+              const cfg = STATUT_CFG[w.statut] || STATUT_CFG.actif;
+              return (
+                <MobileOuvrierRow
+                  key={w.id}
+                  w={w}
+                  cfg={cfg}
+                  pdfLoading={pdfLoadingId === w.id}
+                  onView={() => { setDetail(w); setView('detail'); }}
+                  onEdit={() => openEdit(w)}
+                  onPdf={(e) => { e?.stopPropagation?.(); handleDownloadPdf(w); }}
+                  onDelete={() => del(w.id)}
+                />
+              );
+            })}
+          </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,311 @@
+/**
+ * backups.js — Sauvegardes ERP CITYMO (Supabase + API Railway sécurisée).
+ */
+import { getSupabase } from '../../lib/supabase';
+import { ENV, resolveApiBaseUrl } from '../../config/env';
+import { moduleLabel } from './constants';
+
+const TABLE = 'erp_backups';
+const BACKUP_TIMEOUT_MS = 300000;
+
+const STATUT_DB = {
+  succes: 'Succès',
+  succes_partiel: 'Succès partiel',
+  en_cours: 'En cours',
+  erreur: 'Erreur',
+  planifie: 'Planifié',
+  reconnexion_requise: 'Reconnexion requise',
+};
+
+const STATUT_UI = {
+  Succès: 'succes',
+  'Succès partiel': 'succes_partiel',
+  'En cours': 'en_cours',
+  Erreur: 'erreur',
+  Planifié: 'planifie',
+  'Reconnexion requise': 'reconnexion_requise',
+};
+
+const TYPE_UI = {
+  Complète: 'complete',
+  'Base données': 'base_donnees',
+  Documents: 'documents',
+  Système: 'systeme',
+  Manuelle: 'manuelle',
+  Automatique: 'automatique',
+};
+
+const TYPE_DB = Object.fromEntries(Object.entries(TYPE_UI).map(([k, v]) => [v, k]));
+
+function formatTaille(bytes) {
+  if (!bytes || bytes <= 0) return '—';
+  if (bytes < 1024) return `${bytes} o`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} Ko`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} Mo`;
+}
+
+function mapBackup(row) {
+  const userMsg = row.user_message || '';
+  const techMsg = row.error_message || row.drive_sync_error || '';
+  const listMessage = userMsg
+    || (techMsg && /invalid_grant/i.test(techMsg)
+      ? 'Google Drive déconnecté — reconnexion nécessaire'
+      : '');
+  return {
+    id: row.id,
+    ref: row.ref,
+    nom: row.nom || '—',
+    type: TYPE_DB[row.type] || row.type || 'Manuelle',
+    module: row.module_code ? moduleLabel(row.module_code) : '—',
+    planification: capitalizePlan(row.planification),
+    date: row.created_at
+      ? new Date(row.created_at).toLocaleString('fr-FR')
+      : '—',
+    taille: formatTaille(row.taille_bytes),
+    taille_bytes: row.taille_bytes,
+    statut: STATUT_DB[row.statut] || 'En cours',
+    cree_par: row.cree_par_nom || '—',
+    description: row.description || '',
+    error_message: listMessage || (techMsg.length > 100 ? `${techMsg.slice(0, 97)}…` : techMsg),
+    error_message_detail: techMsg,
+    user_message: userMsg,
+    error_code: row.error_code || '',
+    file_path: row.file_path || null,
+    storage_provider: row.storage_provider || 'supabase_storage',
+    drive_synced: Boolean(row.drive_synced),
+    drive_folder_id: row.drive_folder_id || null,
+    drive_sync_error: row.drive_sync_error || '',
+    steps_json: row.steps_json || null,
+    created_at: row.created_at,
+  };
+}
+
+function capitalizePlan(p) {
+  if (!p || p === 'manuelle') return 'Manuelle';
+  return p.charAt(0).toUpperCase() + p.slice(1);
+}
+
+function isSessionTokenStale(session) {
+  if (!session?.access_token) return true;
+  if (!session.expires_at) return false;
+  return session.expires_at * 1000 < Date.now() + 60_000;
+}
+
+function logBackupAuthDebug(label, session, extra = {}) {
+  if (!import.meta.env.DEV) return;
+  const token = session?.access_token || '';
+  console.info(`[backup:auth] ${label}`, {
+    sessionExists: Boolean(session),
+    accessTokenPresent: Boolean(token),
+    accessTokenLength: token.length,
+    userId: session?.user?.id || null,
+    expiresAt: session?.expires_at
+      ? new Date(session.expires_at * 1000).toISOString()
+      : null,
+    tokenStale: session ? isSessionTokenStale(session) : null,
+    ...extra,
+  });
+}
+
+/**
+ * Récupère un access_token Supabase frais pour les appels /api/backups*.
+ * Aligné sur getAuthToken() (admin/users.js) + refresh si session/token absent ou expiré.
+ */
+async function resolveBackupAuthToken() {
+  const supabase = getSupabase();
+
+  let { data: { session }, error: sessionError } = await supabase.auth.getSession();
+  logBackupAuthDebug('getSession', session, { sessionError: sessionError?.message || null });
+
+  if (!session || isSessionTokenStale(session)) {
+    const { error: refreshError } = await supabase.auth.refreshSession();
+    ({ data: { session }, error: sessionError } = await supabase.auth.getSession());
+    logBackupAuthDebug('après refreshSession + getSession', session, {
+      refreshError: refreshError?.message || null,
+      sessionError: sessionError?.message || null,
+    });
+  }
+
+  const token = session?.access_token?.trim();
+  if (!token) {
+    throw new Error('Session expirée. Reconnectez-vous.');
+  }
+
+  return token;
+}
+
+async function backupApiFetch(path, options = {}) {
+  const token = await resolveBackupAuthToken();
+  const anonKey = ENV.SUPABASE_ANON_KEY?.trim();
+
+  const headers = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${token}`,
+    ...(anonKey ? { apikey: anonKey } : {}),
+    ...(options.headers || {}),
+  };
+
+  if (import.meta.env.DEV) {
+    let supabaseHost = null;
+    try {
+      supabaseHost = ENV.SUPABASE_URL ? new URL(ENV.SUPABASE_URL).host : null;
+    } catch { /* ignore */ }
+    console.info('[backup:auth] headers envoyés', {
+      hasAuthorization: Boolean(headers.Authorization),
+      bearerPrefixOk: headers.Authorization?.startsWith('Bearer '),
+      accessTokenLength: token.length,
+      hasApikey: Boolean(headers.apikey),
+      apikeyLength: headers.apikey?.length || 0,
+      supabaseUrlHost: supabaseHost,
+      contentType: headers['Content-Type'],
+      path,
+      method: options.method || 'GET',
+    });
+  }
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), BACKUP_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(`${resolveApiBaseUrl()}${path}`, {
+      ...options,
+      signal: ctrl.signal,
+      headers,
+    });
+
+    if (!res.ok) {
+      let msg = `Erreur ${res.status}`;
+      try {
+        const err = await res.json();
+        msg = err.error || err.message || msg;
+      } catch { /* ignore */ }
+      throw new Error(msg);
+    }
+
+    return res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export function genBackupRef() {
+  const y = new Date().getFullYear();
+  const n = String(Math.floor(Math.random() * 9000) + 1000);
+  return `BCK-${y}-${n}`;
+}
+
+export async function listBackups() {
+  const sb = getSupabase();
+  const { data, error } = await sb
+    .from(TABLE)
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  if (error) throw error;
+  return (data || []).map(mapBackup);
+}
+
+/**
+ * Lance une vraie sauvegarde via le backend sécurisé (Super Admin).
+ * Planification quotidienne/hebdo/mensuelle → enregistre un schedule.
+ */
+export async function runBackup({ type, planification, description }) {
+  const result = await backupApiFetch('/backups', {
+    method: 'POST',
+    body: JSON.stringify({
+      type,
+      planification,
+      description,
+    }),
+  });
+
+  if (result.scheduled) {
+    return {
+      scheduled: true,
+      message: result.message,
+    };
+  }
+
+  if (result.async) {
+    return {
+      async: true,
+      message: result.message,
+      ...mapBackup(result.backup),
+    };
+  }
+
+  return mapBackup(result.backup);
+}
+
+export async function downloadBackup(id) {
+  const result = await backupApiFetch(`/backups/${id}/download`);
+  if (result.url) {
+    window.open(result.url, '_blank', 'noopener,noreferrer');
+  }
+  return result;
+}
+
+export async function openDriveFolder(id) {
+  const result = await backupApiFetch(`/backups/${id}/drive`);
+  if (result.url) {
+    window.open(result.url, '_blank', 'noopener,noreferrer');
+  }
+  return result;
+}
+
+export async function restoreBackup(id, confirmation) {
+  return backupApiFetch(`/backups/${id}/restore`, {
+    method: 'POST',
+    body: JSON.stringify({ confirmation }),
+  });
+}
+
+export async function deleteBackup(id) {
+  await backupApiFetch(`/backups/${id}`, { method: 'DELETE' });
+}
+
+export async function getDriveStatus() {
+  return backupApiFetch('/backups/status/drive');
+}
+
+/** Tableau de bord santé sauvegardes (Supabase, Drive, scheduler, dernière / prochaine). */
+export async function getBackupHealth() {
+  return backupApiFetch('/backups/status/health');
+}
+
+export async function testDriveConnection() {
+  return backupApiFetch('/backups/drive/test', { method: 'POST', body: '{}' });
+}
+
+export async function startDriveReconnect() {
+  return backupApiFetch('/backups/drive/oauth/start');
+}
+
+export async function disconnectDrive() {
+  return backupApiFetch('/backups/drive/disconnect', { method: 'POST', body: '{}' });
+}
+
+export async function cleanupFailedBackups() {
+  return backupApiFetch('/backups/cleanup-failed', { method: 'POST', body: '{}' });
+}
+
+/** @deprecated Utiliser runBackup */
+export async function createBackupLog(data, actor) {
+  return runBackup({
+    type: data.type,
+    planification: data.planification,
+    description: data.description,
+  });
+}
+
+/** @deprecated Géré par le backend */
+export async function finalizeBackup() {
+  throw new Error('finalizeBackup est géré par le backend.');
+}
+
+/** @deprecated Utiliser restoreBackup */
+export async function requestRestore(backup, confirmation) {
+  return restoreBackup(backup.id, confirmation);
+}
+
+export { mapBackup, formatTaille };

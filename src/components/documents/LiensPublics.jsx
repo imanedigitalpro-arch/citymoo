@@ -1,0 +1,319 @@
+/**
+ * LiensPublics.jsx — Liens publics sécurisés ERP CITYMO
+ */
+
+import {
+  Link, Plus, Eye, Trash2, Search, Filter,
+  Copy, RefreshCw, Lock, Clock, Globe, Loader2,
+} from 'lucide-react';
+import { useState, useCallback } from 'react';
+import { useDocumentPublicLinks } from '../../hooks/useDocumentPublicLinks';
+import { buildPublicLinkUrl } from '../../services/documents/documentPublicLinks';
+import {
+  INPUT_STYLE, SELECT_STYLE, TEXTAREA_STYLE,
+  KpiCard, EmptyState, Modal, SectionTitle, FField, FRow,
+  DepartmentSelect, DepartmentFilterSelect, normalizeDocumentDepartment,
+  Toast,
+} from './shared.jsx';
+
+const EMPTY_LINK = {
+  document: '',
+  departement: '',
+  expiration: '',
+  mot_de_passe: '',
+  acces_unique: false,
+  telechargement: true,
+  lecture_seule: true,
+  notes: '',
+};
+
+function PublicLinkForm({ initial, onSave, onCancel, saving = false, lockDocument = false }) {
+  const [form, setForm] = useState(initial || EMPTY_LINK);
+  const [errors, setErrors] = useState({});
+  const set = (k, v) => setForm((p) => ({ ...p, [k]: v }));
+
+  function validate() {
+    const e = {};
+    if (!form.document.trim()) e.document = 'Requis';
+    return e;
+  }
+
+  function handleSubmit(ev) {
+    ev.preventDefault();
+    const e = validate();
+    if (Object.keys(e).length) { setErrors(e); return; }
+    onSave({ ...form, departement: normalizeDocumentDepartment(form.departement) });
+  }
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <SectionTitle icon={<Link size={12} />}>Générer un lien public</SectionTitle>
+      <FRow>
+        <div style={{ gridColumn: '1 / -1' }}>
+          <FField label="Document" required>
+            <input
+              value={form.document}
+              onChange={(e) => set('document', e.target.value)}
+              placeholder="Nom ou référence du document..."
+              readOnly={lockDocument}
+              style={{
+                ...INPUT_STYLE,
+                borderColor: errors.document ? 'var(--red)' : 'var(--border)',
+                ...(lockDocument ? { background: 'var(--surface-2)', cursor: 'default' } : {}),
+              }}
+            />
+            {errors.document && <div style={{ color: 'var(--red)', fontSize: '0.7rem', marginTop: 3 }}>{errors.document}</div>}
+          </FField>
+        </div>
+      </FRow>
+      <FRow>
+        <FField label="Département">
+          <DepartmentSelect value={form.departement} onChange={(v) => set('departement', v)} style={SELECT_STYLE} />
+        </FField>
+      </FRow>
+      <SectionTitle icon={<Lock size={12} />}>Paramètres du lien</SectionTitle>
+      <FRow>
+        <FField label="Date expiration">
+          <input type="date" value={form.expiration} onChange={(e) => set('expiration', e.target.value)} style={INPUT_STYLE} />
+        </FField>
+        <FField label="Mot de passe (optionnel)">
+          <input type="password" value={form.mot_de_passe} onChange={(e) => set('mot_de_passe', e.target.value)} placeholder="Laisser vide pour aucun" style={INPUT_STYLE} />
+        </FField>
+      </FRow>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
+        {[
+          ['acces_unique', 'Accès unique (expire après un accès)'],
+          ['telechargement', 'Téléchargement autorisé'],
+          ['lecture_seule', 'Lecture seule'],
+        ].map(([k, lbl]) => (
+          <label key={k} style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', fontSize: '0.88rem', color: 'var(--text-2)' }}>
+            <input type="checkbox" checked={!!form[k]} onChange={(e) => set(k, e.target.checked)} style={{ width: 16, height: 16, accentColor: 'var(--red)' }} />
+            {lbl}
+          </label>
+        ))}
+      </div>
+      <div style={{ marginBottom: 20 }}>
+        <FField label="Notes internes">
+          <textarea value={form.notes} onChange={(e) => set('notes', e.target.value)} placeholder="Destinataire, contexte..." style={TEXTAREA_STYLE} />
+        </FField>
+      </div>
+      <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+        <button type="button" className="btn btn-secondary" onClick={onCancel} disabled={saving}>Annuler</button>
+        <button type="submit" className="btn btn-primary" disabled={saving} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          {saving ? <Loader2 size={14} className="spin" /> : <Link size={14} />}
+          {initial?.id ? 'Enregistrer' : 'Générer le lien'}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+export default function LiensPublics() {
+  const { liens, loading, saving, error, configured, createLink, updateLink, toggleLink, removeLink } = useDocumentPublicLinks();
+  const [search, setSearch] = useState('');
+  const [filterStatut, setFilterStatut] = useState('');
+  const [filterDept, setFilterDept] = useState('');
+  const [showFilters, setShowFilters] = useState(false);
+  const [showModal, setShowModal] = useState(false);
+  const [editLien, setEditLien] = useState(null);
+  const [copied, setCopied] = useState(null);
+  const [toast, setToast] = useState(null);
+
+  const today = new Date().toISOString().slice(0, 10);
+
+  const handleSave = useCallback(async (data) => {
+    const result = editLien
+      ? await updateLink(editLien.id, data)
+      : await createLink({ document: data.document, ...data });
+    if (result.success) {
+      setShowModal(false);
+      setEditLien(null);
+      if (!editLien && result.data?.token) {
+        const url = result.data.public_url || buildPublicLinkUrl(result.data.token);
+        navigator.clipboard.writeText(url).catch(() => {});
+        setToast({ type: 'success', msg: `Lien généré et copié : ${url}` });
+      } else {
+        setToast({ type: 'success', msg: 'Lien public mis à jour.' });
+      }
+    } else {
+      setToast({ type: 'error', msg: result.error || 'Impossible de générer le lien.' });
+    }
+  }, [editLien, createLink, updateLink]);
+
+  async function handleDelete(id) {
+    if (!window.confirm('Supprimer ce lien public ?')) return;
+    const result = await removeLink(id);
+    if (result.success) setToast({ type: 'success', msg: 'Lien public supprimé.' });
+  }
+
+  function handleCopy(l) {
+    const url = buildPublicLinkUrl(l.token);
+    navigator.clipboard.writeText(url).catch(() => {});
+    setCopied(l.id);
+    setTimeout(() => setCopied(null), 1800);
+    setToast({ type: 'success', msg: 'Lien copié dans le presse-papiers.' });
+  }
+
+  async function handleToggle(l) {
+    const next = l.statut === 'actif' ? 'desactive' : 'actif';
+    const result = await toggleLink(l.id, next);
+    if (result.success) {
+      setToast({ type: 'success', msg: next === 'actif' ? 'Lien activé.' : 'Lien désactivé.' });
+    }
+  }
+
+  const filtered = liens.filter((l) => {
+    const q = search.toLowerCase();
+    const matchQ = !q || l.document.toLowerCase().includes(q) || (l.token || '').includes(q);
+    const isExpired = l.expiration && l.expiration < today;
+    const st = l.statut === 'desactive' ? 'desactive' : isExpired ? 'expire' : 'actif';
+    const matchS = !filterStatut || st === filterStatut;
+    const matchD = !filterDept || l.departement === filterDept;
+    return matchQ && matchS && matchD;
+  });
+
+  const actifs = liens.filter((l) => l.statut === 'actif' && (!l.expiration || l.expiration >= today)).length;
+  const expires = liens.filter((l) => l.expiration && l.expiration < today).length;
+  const totalDL = liens.reduce((s, l) => s + (l.acces_count || 0), 0);
+
+  return (
+    <div className="animate-fade-in">
+      <div className="page-header flex-between" style={{ flexWrap: 'wrap', gap: 10 }}>
+        <div>
+          <h1 className="page-title">LIENS PUBLICS</h1>
+          <p className="page-subtitle">Gestion des liens de partage externes sécurisés.</p>
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button type="button" className="btn btn-ghost btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }} onClick={() => setShowFilters((f) => !f)}><Filter size={14} /> Filtres</button>
+          <button type="button" className="btn btn-primary" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }} onClick={() => { setEditLien(null); setShowModal(true); }}><Plus size={15} /> Générer un lien</button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="card" style={{ marginBottom: 16, padding: '12px 16px', borderColor: 'var(--red)', color: 'var(--red)', fontSize: '0.85rem' }}>
+          {error}
+          {!configured && (
+            <div style={{ marginTop: 6, fontSize: '0.78rem', color: 'var(--text-3)' }}>
+              Exécutez <code>supabase/RUN_DOCUMENT_PUBLIC_LINKS.sql</code> dans le SQL Editor Supabase.
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="stat-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(165px, 1fr))', marginBottom: 20 }}>
+        <KpiCard icon={<Link size={17} />} label="Liens actifs" value={actifs} color="green" />
+        <KpiCard icon={<Clock size={17} />} label="Liens expirés" value={expires} color="red" />
+        <KpiCard icon={<Globe size={17} />} label="Accès externes" value={totalDL} color="orange" />
+        <KpiCard icon={<Link size={17} />} label="Total liens" value={liens.length} color="blue" />
+      </div>
+
+      {showFilters && (
+        <div className="card" style={{ marginBottom: 16, padding: '14px 20px' }}>
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+            <div style={{ flex: 1, minWidth: 200, position: 'relative' }}>
+              <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-3)' }} />
+              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Document, token..." style={{ ...INPUT_STYLE, paddingLeft: 32 }} />
+            </div>
+            <select value={filterStatut} onChange={(e) => setFilterStatut(e.target.value)} style={{ ...SELECT_STYLE, maxWidth: 160 }}>
+              <option value="">Tous les statuts</option>
+              <option value="actif">Actif</option>
+              <option value="expire">Expiré</option>
+              <option value="desactive">Désactivé</option>
+            </select>
+            <DepartmentFilterSelect value={filterDept} onChange={setFilterDept} style={{ ...SELECT_STYLE, maxWidth: 240, flex: '0 1 240px' }} />
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => { setSearch(''); setFilterStatut(''); setFilterDept(''); }}>Réinitialiser</button>
+          </div>
+        </div>
+      )}
+
+      {!showFilters && (
+        <div className="card" style={{ marginBottom: 12, padding: '10px 14px' }}>
+          <div style={{ position: 'relative' }}>
+            <Search size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-3)' }} />
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Rechercher un lien..." style={{ ...INPUT_STYLE, paddingLeft: 32 }} />
+          </div>
+        </div>
+      )}
+
+      <div className="card" style={{ padding: 0 }}>
+        {loading ? (
+          <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-3)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+            <Loader2 size={20} className="spin" /> Chargement...
+          </div>
+        ) : filtered.length === 0 ? (
+          <EmptyState icon={<Link size={24} />} title="Aucun lien public" sub="Générez des liens de partage sécurisés pour vos documents" action="Générer un lien" onAction={() => { setEditLien(null); setShowModal(true); }} />
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Document</th>
+                  <th>Département</th>
+                  <th>Lien / Token</th>
+                  <th>Créé le</th>
+                  <th>Expiration</th>
+                  <th>Accès</th>
+                  <th>Téléch.</th>
+                  <th>Statut</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((l) => {
+                  const isExpired = l.expiration && l.expiration < today;
+                  const st = l.statut === 'desactive' ? 'desactive' : isExpired ? 'expire' : 'actif';
+                  const stBadge = st === 'actif' ? 'badge-green' : st === 'expire' ? 'badge-red' : 'badge-grey';
+                  const stLabel = st === 'actif' ? 'Actif' : st === 'expire' ? 'Expiré' : 'Désactivé';
+                  return (
+                    <tr key={l.id}>
+                      <td style={{ fontWeight: 600 }}>{l.document}</td>
+                      <td data-label="Département">{l.departement || '—'}</td>
+                      <td data-label="Token">
+                        <span style={{ fontFamily: 'var(--font-head)', fontSize: '0.78rem', color: 'var(--text-3)', background: 'var(--surface-2)', padding: '2px 8px', borderRadius: 4 }}>
+                          /share/{l.token?.slice(0, 8)}…
+                        </span>
+                      </td>
+                      <td data-label="Créé le">{l.date_creation}</td>
+                      <td data-label="Expiration">
+                        {l.expiration
+                          ? <span style={{ color: isExpired ? 'var(--red)' : 'inherit' }}>{l.expiration}</span>
+                          : <span style={{ color: 'var(--text-3)' }}>—</span>}
+                      </td>
+                      <td data-label="Accès">{l.acces_count || 0}</td>
+                      <td data-label="Téléch.">{l.telechargement ? <span className="badge badge-green" style={{ fontSize: '0.7rem' }}>Oui</span> : <span className="badge badge-grey" style={{ fontSize: '0.7rem' }}>Non</span>}</td>
+                      <td data-label="Statut"><span className={'badge ' + stBadge} style={{ fontSize: '0.7rem' }}>{stLabel}</span></td>
+                      <td>
+                        <div style={{ display: 'flex', gap: 3 }}>
+                          <button type="button" className="btn btn-ghost btn-sm" title={copied === l.id ? 'Copié !' : 'Copier le lien'} onClick={() => handleCopy(l)} style={{ color: copied === l.id ? '#2E7D32' : undefined }}>
+                            <Copy size={13} />
+                          </button>
+                          <button type="button" className="btn btn-ghost btn-sm" title="Modifier" onClick={() => { setEditLien(l); setShowModal(true); }}><Eye size={13} /></button>
+                          <button type="button" className="btn btn-ghost btn-sm" title={l.statut === 'actif' ? 'Désactiver' : 'Activer'} onClick={() => handleToggle(l)} disabled={saving}>
+                            <RefreshCw size={13} />
+                          </button>
+                          <button type="button" className="btn btn-ghost btn-sm" title="Supprimer" onClick={() => handleDelete(l.id)} style={{ color: 'var(--red)' }} disabled={saving}><Trash2 size={13} /></button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <Modal open={showModal} onClose={() => { setShowModal(false); setEditLien(null); }} title={editLien ? 'Modifier le lien' : 'Générer un lien public'} width={580}>
+        <PublicLinkForm
+          key={editLien?.id || 'new'}
+          initial={editLien || EMPTY_LINK}
+          saving={saving}
+          onSave={handleSave}
+          onCancel={() => { setShowModal(false); setEditLien(null); }}
+        />
+      </Modal>
+
+      <Toast toast={toast} />
+    </div>
+  );
+}

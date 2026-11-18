@@ -1,0 +1,108 @@
+/**
+ * Inventaire.jsx — Router module Inventaire & Dépôt ERP CITYMO
+ * État partagé entre sous-modules : articles (sync Supabase), dépôts (UI local)
+ */
+import { useState, useEffect, useCallback } from 'react';
+import CategoriesStock from './inventaire/CategoriesStock.jsx';
+import ArticlesStock   from './inventaire/ArticlesStock.jsx';
+import Depots          from './inventaire/Depots.jsx';
+import BonsMouvements  from './inventaire/BonsMouvements.jsx';
+import MouvementRapide from './inventaire/MouvementRapide.jsx';
+import DemandesChantier from './inventaire/DemandesChantier.jsx';
+import Stocks          from './inventaire/Stocks.jsx';
+import InventairePhysiqueScan from './inventaire/InventairePhysiqueScan.jsx';
+import AffectationMaterielScan from './inventaire/AffectationMaterielScan.jsx';
+import { listStockArticles } from '../services/inventaire/stockArticles';
+import { listStockCategories } from '../services/inventaire/stockCategories';
+import { ensureStockWarehousesSeeded } from '../services/inventaire/stockWarehouses';
+import { EMPLACEMENTS_STOCK, filterVisibleEmplacements } from './inventaire/shared.jsx';
+import { subscribeStockChanged } from '../services/inventaire/stockSync';
+
+export default function Inventaire({ activeTab, initialArticleCode, onArticleCodeConsumed, onNavigate }) {
+  const tab = activeTab || 'categories-stock';
+
+  const [articles, setArticles] = useState([]);
+  const [categories, setCategories] = useState([]);
+  const [depots, setDepots] = useState([]);
+  const [emplacementNoms, setEmplacementNoms] = useState(EMPLACEMENTS_STOCK);
+
+  useEffect(() => {
+    listStockArticles()
+      .then((rows) => setArticles(rows || []))
+      .catch(() => {});
+    listStockCategories()
+      .then((rows) => setCategories(rows || []))
+      .catch(() => {});
+    ensureStockWarehousesSeeded(EMPLACEMENTS_STOCK)
+      .then((rows) => {
+        if (rows?.length) setEmplacementNoms(filterVisibleEmplacements(rows.map((r) => r.nom)));
+      })
+      .catch(() => {});
+  }, [tab]);
+
+  useEffect(() => {
+    return subscribeStockChanged(() => {
+      listStockArticles()
+        .then((rows) => setArticles(rows || []))
+        .catch(() => {});
+    });
+  }, []);
+
+  const handleDepotsChange = useCallback((list) => {
+    setDepots(list);
+    if (list?.length) setEmplacementNoms(filterVisibleEmplacements(list.map((d) => d.nom)));
+  }, []);
+
+  return (
+    <div className="inventaire-module">
+      {tab === 'categories-stock' && <CategoriesStock />}
+      {tab === 'articles-stock' && (
+        <ArticlesStock
+          onArticlesChange={setArticles}
+          emplacementsList={emplacementNoms}
+          initialArticleCode={initialArticleCode}
+          onArticleCodeConsumed={onArticleCodeConsumed}
+          onNavigate={onNavigate}
+        />
+      )}
+      {tab === 'depots' && (
+        <Depots
+          articles={articles}
+          onDepotsChange={handleDepotsChange}
+        />
+      )}
+      {tab === 'bons-mouvements' && (
+        <BonsMouvements
+          articles={articles}
+          onArticlesChange={setArticles}
+          onNavigate={onNavigate}
+        />
+      )}
+      {tab === 'mouvement-rapide' && (
+        <MouvementRapide
+          articles={articles}
+          emplacementsList={emplacementNoms}
+          onArticlesChange={setArticles}
+          onNavigate={onNavigate}
+        />
+      )}
+      {tab === 'demandes-chantier' && <DemandesChantier onNavigate={onNavigate} />}
+      {tab === 'stocks' && (
+        <Stocks
+          articles={articles}
+          categories={categories}
+          depots={depots}
+          emplacementsList={emplacementNoms}
+          onNavigate={onNavigate}
+          onArticlesChange={setArticles}
+        />
+      )}
+      {tab === 'inventaire-physique' && (
+        <InventairePhysiqueScan emplacementsList={emplacementNoms} />
+      )}
+      {tab === 'affectation-materiel' && (
+        <AffectationMaterielScan />
+      )}
+    </div>
+  );
+}
