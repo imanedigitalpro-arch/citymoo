@@ -54,6 +54,7 @@ import {
   isLineFullyPrepared,
 } from '../../services/inventaire/articleScanWorkflow';
 import { KpiCard, INPUT_STYLE, SELECT_STYLE } from './shared.jsx';
+import { useAuth } from '../../hooks/useAuth';
 
 const EMPTY_FORM = {
   project_id: '', project_ref: '', project_name: '', client_name: '',
@@ -124,6 +125,7 @@ function projectFormFromProjet(projet) {
 }
 
 export default function DemandesChantier({ projet, embedded = false, onNavigate }) {
+  const { user, loading: authLoading } = useAuth();
   const embeddedProjectId = embedded && projet?.id ? String(projet.id) : null;
   const [requests, setRequests] = useState([]);
   const [projects, setProjects] = useState([]);
@@ -145,6 +147,13 @@ export default function DemandesChantier({ projet, embedded = false, onNavigate 
   const [lines, setLines] = useState(() => buildInitialLines());
 
   const load = useCallback(async () => {
+    if (authLoading) return;
+    if (!user) {
+      setRequests([]);
+      setError('Session requise. Reconnectez-vous puis Actualiser.');
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError('');
     try {
@@ -155,7 +164,7 @@ export default function DemandesChantier({ projet, embedded = false, onNavigate 
           projectId: embeddedProjectId || undefined,
         }),
         embedded ? Promise.resolve(projet ? [projet] : []) : listProjects(),
-        listStockArticles(),
+        listStockArticles({ withLastMovements: false }),
       ]);
       setRequests(rows);
       setProjects(projs || []);
@@ -165,7 +174,7 @@ export default function DemandesChantier({ projet, embedded = false, onNavigate 
     } finally {
       setLoading(false);
     }
-  }, [statutFilter, prioriteFilter, embeddedProjectId, embedded, projet]);
+  }, [authLoading, user, statutFilter, prioriteFilter, embeddedProjectId, embedded, projet]);
 
   useEffect(() => { load(); }, [load]);
 
