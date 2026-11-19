@@ -113,7 +113,15 @@ export default function FeuilleCaisse() {
   const isDG = isDGUser(user);
   const superAdmin = isSuperAdmin(user);
 
-  const [tableFilter, setTableFilter] = useState('today');
+  // Défaut = Vue mois : « Aujourd'hui » est souvent vide et donnait l'impression
+  // que la feuille ne chargeait pas (147 op. ce mois mais 0 du jour).
+  const [tableFilter, setTableFilter] = useState(() => {
+    try {
+      const saved = sessionStorage.getItem('citymo_caisse_table_filter');
+      if (saved === 'today' || saved === 'yesterday' || saved === 'month') return saved;
+    } catch { /* ignore */ }
+    return 'month';
+  });
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
   const [showModal, setShowModal] = useState(false);
@@ -151,6 +159,7 @@ export default function FeuilleCaisse() {
       setMonth(now.getMonth() + 1);
     }
     setTableFilter(id);
+    try { sessionStorage.setItem('citymo_caisse_table_filter', id); } catch { /* ignore */ }
   }
 
   useEffect(() => {
@@ -534,10 +543,16 @@ export default function FeuilleCaisse() {
             sub={configured && !error
               ? viewMode === 'month'
                 ? 'Historique complet du mois. Passez en vue jour pour le détail quotidien.'
-                : 'Validez un paiement dans Paiement hebdo ou Sous-traitants — la sortie s\'ajoute automatiquement à la date du paiement.'
+                : cashSheetRecords.length > 0
+                  ? `${cashSheetRecords.length} opération(s) ce mois — ouvrez « Vue mois » pour les voir. Aujourd'hui n'a pas encore de mouvement.`
+                  : 'Validez un paiement dans Paiement hebdo ou Sous-traitants — la sortie s\'ajoute automatiquement à la date du paiement.'
               : 'Connectez-vous et vérifiez la configuration Supabase.'}
-            action={canManage && canEditDay ? 'Alimentation manuelle' : undefined}
-            onAction={canManage && canEditDay ? () => setShowModal(true) : undefined}
+            action={viewMode === 'day' && cashSheetRecords.length > 0
+              ? 'Voir le mois'
+              : (canManage && canEditDay ? 'Alimentation manuelle' : undefined)}
+            onAction={viewMode === 'day' && cashSheetRecords.length > 0
+              ? () => selectTableFilter('month')
+              : (canManage && canEditDay ? () => setShowModal(true) : undefined)}
           />
         </div>
       ) : (
