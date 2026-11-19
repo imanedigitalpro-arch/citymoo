@@ -171,6 +171,7 @@ const NAV = [
     section: 'Achats',
     items: [
       { id: 'demandes-achat',     label: "Demandes d'achat",     icon: ClipboardList },
+      { id: 'demandes-recuperation', label: 'Demandes de récupération', icon: Truck },
       { id: 'bons-commande',      label: 'Bon de commande',      icon: ShoppingCart },
       { id: 'fournisseurs',       label: 'Fournisseurs',         icon: UserCog },
       { id: 'categories-fournisseurs', label: 'Catégories fournisseurs', icon: Tag },
@@ -247,6 +248,7 @@ const MODULE_LABELS = {
   'depenses-par-projet': 'Dépenses par projet',
   'ordres-paiement':   'Ordre de paiement',
   'demandes-achat':    "Demandes d'achat",
+  'demandes-recuperation': 'Demandes de récupération',
   'bons-commande':     'Bon de commande',
   fournisseurs:        'Fournisseurs',
   'categories-fournisseurs': 'Catégories fournisseurs',
@@ -339,6 +341,7 @@ function PageContent({
     case 'ordres-paiement':     return <Finance activeTab="ordres-paiement" onNavigate={onNavigate} />;
     /* Achats */
     case 'demandes-achat':      return <Achats activeTab="demandes-achat" onNavigate={onNavigate} />;
+    case 'demandes-recuperation': return <Achats activeTab="demandes-recuperation" onNavigate={onNavigate} />;
     case 'bons-commande':       return <Achats activeTab="bons-commande" onNavigate={onNavigate} />;
     case 'fournisseurs':        return <Achats activeTab="fournisseurs" onNavigate={onNavigate} />;
     case 'categories-fournisseurs': return <Achats activeTab="categories-fournisseurs" onNavigate={onNavigate} />;

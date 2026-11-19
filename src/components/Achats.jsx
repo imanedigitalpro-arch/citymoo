@@ -4,6 +4,7 @@
  */
 import { useState } from 'react';
 import DemandesAchat    from './achats/DemandesAchat.jsx';
+import DemandesRecuperation from './achats/DemandesRecuperation.jsx';
 import BonsCommande     from './achats/BonsCommande.jsx';
 import Fournisseurs     from './achats/Fournisseurs.jsx';
 import CategoriesFournisseurs from './achats/CategoriesFournisseurs.jsx';
@@ -18,6 +19,7 @@ export default function Achats({ activeTab, onNavigate }) {
   return (
     <div>
       {tab === 'demandes-achat'    && <DemandesAchat />}
+      {tab === 'demandes-recuperation' && <DemandesRecuperation />}
       {tab === 'bons-commande'     && <BonsCommande />}
       {tab === 'fournisseurs'      && (
         <Fournisseurs
