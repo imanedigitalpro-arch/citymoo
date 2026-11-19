@@ -903,7 +903,7 @@ export default function MouvementRapide({ articles = [], emplacementsList, onArt
                     && normalizeArticleType(selectedArticle) === ARTICLE_TYPE_CONSOMMABLE
                     && isDiversEmplacement(form.emplacement_destination) && (
                     <div style={{ fontSize: '0.75rem', color: 'var(--text-3)', marginTop: 6 }}>
-                      Ce mouvement sera automatiquement comptabilisé dans Dépenses générales.
+                      Ce mouvement sera automatiquement comptabilisé dans Dépenses courantes.
                     </div>
                   )}
                 </FField>
@@ -1147,7 +1147,7 @@ export default function MouvementRapide({ articles = [], emplacementsList, onArt
                   onNavigate?.('charges');
                 }}
               >
-                Voir dans Dépenses générales
+                Voir dans Dépenses courantes
               </button>
             </div>
           );
