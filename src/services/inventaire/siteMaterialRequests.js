@@ -323,12 +323,11 @@ export async function listSiteMaterialRequests(filters = {}) {
   const { data, error } = await q;
   if (error) throw error;
   const rows = data || [];
-  // Liste rapide : lignes pour totaux, SANS enrichissement catalogue stock
-  // (le catalogue est chargé à l'ouverture formulaire / détail).
+  const stockArticles = await listStockArticles({ withLastMovements: false }).catch(() => []);
   const linesByRequest = await loadLinesForRequests(rows.map((r) => r.id));
   return rows.map((row) => normalizeRequest(
     row,
-    linesByRequest.get(String(row.id)) || [],
+    enrichLinesWithStock(linesByRequest.get(String(row.id)) || [], stockArticles),
   ));
 }
 
