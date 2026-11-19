@@ -510,21 +510,31 @@ export default function Charges({ categories, onNavigate }) {
     await save({ ...charge, statut: 'Annulé' }, charge.id, charge.categorie);
   }
 
+  const activeCharges = charges.filter((c) => c.statut !== 'Annulé');
+
   const filtered = charges.filter(c => {
     const q = search.toLowerCase();
     const matchQ = !q || chargeDisplayRef(c).toLowerCase().includes(q) || c.libelle?.toLowerCase().includes(q) || (c.fournisseur || '').toLowerCase().includes(q) || (c.projet_lie || '').toLowerCase().includes(q);
-    const matchS = !filterStatut || c.statut === filterStatut;
+    // Par défaut on masque les Annulé (copies / refus) — comme la feuille de caisse.
+    // Filtre statut « Annulé » pour les revoir.
+    const matchS = filterStatut
+      ? c.statut === filterStatut
+      : c.statut !== 'Annulé';
     const matchC = !filterCat || c.categorie === filterCat;
     const matchM = !filterMode || c.mode_paiement === filterMode;
     return matchQ && matchS && matchC && matchM;
   });
 
-  const totalDep     = charges.reduce((s, c) => s + (c.montant || 0), 0);
-  const depMois      = charges.filter(c => (c.date || '').startsWith(moisActuel)).reduce((s, c) => s + (c.montant || 0), 0);
-  const depProjet    = charges.filter(c => c.projet_lie).reduce((s, c) => s + (c.montant || 0), 0);
-  const depHorsProj  = charges.filter(c => !c.projet_lie).reduce((s, c) => s + (c.montant || 0), 0);
-  const validees     = charges.filter(c => c.statut === 'Validée' || c.statut === 'Comptabilisée').length;
-  const enAttente    = charges.filter(c => c.statut === 'En attente validation' || c.statut === 'Brouillon').length;
+  const totalDep     = activeCharges.reduce((s, c) => s + (c.montant || 0), 0);
+  const depMois      = activeCharges.filter(c => (c.date || '').startsWith(moisActuel)).reduce((s, c) => s + (c.montant || 0), 0);
+  const depProjet    = activeCharges.filter(c => c.projet_lie).reduce((s, c) => s + (c.montant || 0), 0);
+  const depHorsProj  = activeCharges.filter(c => !c.projet_lie).reduce((s, c) => s + (c.montant || 0), 0);
+  const validees     = activeCharges.filter(c => (
+    c.statut === 'Validé' || c.statut === 'Validée'
+    || c.statut === 'Payé' || c.statut === 'Comptabilisée'
+    || c.statut === 'Comptabilisée automatiquement'
+  )).length;
+  const enAttente    = activeCharges.filter(c => c.statut === 'En attente validation' || c.statut === 'Brouillon').length;
 
   if (loading && !charges.length) {
     return (
