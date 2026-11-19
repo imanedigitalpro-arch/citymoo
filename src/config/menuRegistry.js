@@ -144,6 +144,7 @@ export const ERP_RUBRIQUES = Object.freeze([
     departmentIds: [3],
     submodules: [
       { code: 'demandes-achat', label: "Demandes d'achat" },
+      { code: 'demandes-recuperation', label: 'Demandes de récupération' },
       { code: 'bons-commande', label: 'Bon de commande' },
       { code: 'fournisseurs', label: 'Fournisseurs' },
       { code: 'categories-fournisseurs', label: 'Catégories fournisseurs' },
