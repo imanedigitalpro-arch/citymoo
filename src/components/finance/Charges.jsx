@@ -8,6 +8,7 @@ import { useFinanceCharges } from '../../hooks/useFinanceCharges';
 import { useAuth } from '../../hooks/useAuth';
 import { can } from '../../services/admin/permissions';
 import { chargeDisplayRef, listProjectsForCharges } from '../../services/finance/charges';
+import { exportChargesExcel } from '../../services/finance/chargeExport';
 import { repairDuplicateChargeRefs } from '../../services/finance/repairDuplicateChargeRefs';
 import {
   isStockDiversCharge,
@@ -570,7 +571,14 @@ export default function Charges({ categories, onNavigate }) {
           <button className="btn btn-ghost btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }} onClick={() => setShowFilters(f => !f)}>
             <Filter size={14} /> Filtres
           </button>
-          <button className="btn btn-secondary btn-sm" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+            title="Exporter la liste filtrée (CSV Excel)"
+            disabled={!filtered.length}
+            onClick={() => exportChargesExcel(filtered)}
+          >
             <Download size={14} /> Export
           </button>
           <button className="btn btn-primary" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }} onClick={() => { setEditCharge(null); setShowModal(true); }}>
