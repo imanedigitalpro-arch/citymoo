@@ -9,7 +9,31 @@ const LEVELS = 'stock_levels';
 const MOVEMENTS = 'stock_movements';
 const ARTICLES = 'stock_articles';
 
+/** PostgREST default max-rows is 1000. */
+const PAGE_SIZE = 1000;
+
 const DEPRECATED_EMPLACEMENTS = ['F5', 'G3', 'F2'];
+
+async function fetchAllRows(table, select, orderBy = []) {
+  const rows = [];
+  let from = 0;
+  for (;;) {
+    let query = getSupabase()
+      .from(table)
+      .select(select)
+      .range(from, from + PAGE_SIZE - 1);
+    for (const ord of orderBy) {
+      query = query.order(ord.column, { ascending: ord.ascending !== false });
+    }
+    const { data, error } = await query;
+    if (error) throw error;
+    const batch = data || [];
+    rows.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return rows;
+}
 
 function isDeprecatedEmplacement(value) {
   const k = String(value || '').trim().toUpperCase();
@@ -226,12 +250,18 @@ function movementInstant(row) {
  * Charge toutes les lignes stock_levels.
  */
 export async function listAllStockLevels() {
-  const { data, error } = await getSupabase()
-    .from(LEVELS)
-    .select('id, article_id, emplacement, quantite, warehouse_id, updated_at')
-    .order('emplacement', { ascending: true });
-  if (error) {
-    if (error.code === '42P01') return [];
+  let data;
+  try {
+    data = await fetchAllRows(
+      LEVELS,
+      'id, article_id, emplacement, quantite, warehouse_id, updated_at',
+      [
+        { column: 'emplacement', ascending: true },
+        { column: 'id', ascending: true },
+      ],
+    );
+  } catch (error) {
+    if (error?.code === '42P01') return [];
     throw error;
   }
   return (data || []).map((l) => ({
@@ -246,13 +276,14 @@ export async function listAllStockLevels() {
 
 /** Tous les mouvements (pour ledger / contrôle emplacement). */
 export async function listAllStockMovementsRaw() {
-  const { data, error } = await getSupabase()
-    .from(MOVEMENTS)
-    .select('id, ref_mouvement, type_mouvement, article_id, quantite, date_mouvement, motif, payload, created_at, stock_articles(reference, nom)')
-    .order('date_mouvement', { ascending: true })
-    .order('created_at', { ascending: true });
-  if (error) throw error;
-  return data || [];
+  return fetchAllRows(
+    MOVEMENTS,
+    'id, ref_mouvement, type_mouvement, article_id, quantite, date_mouvement, motif, payload, created_at, stock_articles(reference, nom)',
+    [
+      { column: 'date_mouvement', ascending: true },
+      { column: 'created_at', ascending: true },
+    ],
+  );
 }
 
 /**
@@ -616,17 +647,34 @@ export function buildArticleEmplacementLedger(movements, emplacement, articleId)
 export async function rebuildStockLevelsFromMovements({ dryRun = true } = {}) {
   await requireSupabaseUserId();
 
-  const [{ data: movements, error: mErr }, currentLevels, { data: articles, error: aErr }] = await Promise.all([
-    getSupabase()
-      .from(MOVEMENTS)
-      .select('id, ref_mouvement, type_mouvement, article_id, quantite, date_mouvement, payload, created_at')
-      .order('date_mouvement', { ascending: true })
-      .order('created_at', { ascending: true }),
-    listAllStockLevels(),
-    getSupabase().from(ARTICLES).select('id, reference, nom, emplacement'),
-  ]);
-  if (mErr) throw mErr;
-  if (aErr) throw aErr;
+  // Pagination obligatoire : PostgREST coupe à 1000 lignes sinon (dry-run faux).
+  let movements;
+  let articles;
+  let currentLevels;
+  try {
+    [movements, currentLevels, articles] = await Promise.all([
+      fetchAllRows(
+        MOVEMENTS,
+        'id, ref_mouvement, type_mouvement, article_id, quantite, date_mouvement, payload, created_at',
+        [
+          { column: 'date_mouvement', ascending: true },
+          { column: 'created_at', ascending: true },
+          { column: 'id', ascending: true },
+        ],
+      ),
+      listAllStockLevels(),
+      fetchAllRows(
+        ARTICLES,
+        'id, reference, nom, emplacement',
+        [
+          { column: 'reference', ascending: true },
+          { column: 'id', ascending: true },
+        ],
+      ),
+    ]);
+  } catch (err) {
+    throw err;
+  }
 
   const applicable = (movements || []).filter(isMovementStockApplicable);
   const skipped = (movements || []).length - applicable.length;

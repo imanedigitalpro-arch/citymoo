@@ -47,7 +47,7 @@ export function useStockArticles() {
       } else if (seedRes?.seeded > 0) {
         setSuccess(`${seedRes.seeded} articles du catalogue importés.`);
       }
-      const rows = await listStockArticles();
+      const rows = await listStockArticles({ withLastMovements: true });
       setRecords(rows);
       if (seedRes?.error && !rows.length) {
         setError(formatSupabaseError(
