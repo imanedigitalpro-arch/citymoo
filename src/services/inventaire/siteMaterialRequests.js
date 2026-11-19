@@ -168,8 +168,12 @@ function normalizeRequest(row, lines = [], history = []) {
 }
 
 async function requireUser() {
-  const { data: { user }, error } = await getSupabase().auth.getUser();
-  if (error || !user) throw new Error('Session requise.');
+  const sb = getSupabase();
+  // getSession d'abord (rapide / cache local) — évite faux "Session requise" au chargement.
+  const { data: { session } } = await sb.auth.getSession();
+  if (session?.user) return session.user;
+  const { data: { user }, error } = await sb.auth.getUser();
+  if (error || !user) throw new Error('Session requise. Reconnectez-vous puis Actualiser.');
   return user;
 }
 
@@ -319,12 +323,12 @@ export async function listSiteMaterialRequests(filters = {}) {
   const { data, error } = await q;
   if (error) throw error;
   const rows = data || [];
-  // Catalogue léger (sans historique mouvements) — sinon la page reste en spinner.
-  const stockArticles = await listStockArticles({ withLastMovements: false }).catch(() => []);
+  // Liste rapide : lignes pour totaux, SANS enrichissement catalogue stock
+  // (le catalogue est chargé à l'ouverture formulaire / détail).
   const linesByRequest = await loadLinesForRequests(rows.map((r) => r.id));
   return rows.map((row) => normalizeRequest(
     row,
-    enrichLinesWithStock(linesByRequest.get(String(row.id)) || [], stockArticles),
+    linesByRequest.get(String(row.id)) || [],
   ));
 }
 

@@ -54,6 +54,7 @@ import {
   isLineFullyPrepared,
 } from '../../services/inventaire/articleScanWorkflow';
 import { KpiCard, INPUT_STYLE, SELECT_STYLE } from './shared.jsx';
+import { useAuth } from '../../hooks/useAuth';
 
 const EMPTY_FORM = {
   project_id: '', project_ref: '', project_name: '', client_name: '',
@@ -124,10 +125,12 @@ function projectFormFromProjet(projet) {
 }
 
 export default function DemandesChantier({ projet, embedded = false, onNavigate }) {
+  const { user, loading: authLoading } = useAuth();
   const embeddedProjectId = embedded && projet?.id ? String(projet.id) : null;
   const [requests, setRequests] = useState([]);
   const [projects, setProjects] = useState([]);
   const [stockArticles, setStockArticles] = useState([]);
+  const [stockLoading, setStockLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -144,29 +147,46 @@ export default function DemandesChantier({ projet, embedded = false, onNavigate 
   const [form, setForm] = useState(EMPTY_FORM);
   const [lines, setLines] = useState(() => buildInitialLines());
 
+  const ensureStockArticles = useCallback(async () => {
+    if (stockArticles.length) return stockArticles;
+    setStockLoading(true);
+    try {
+      const arts = await listStockArticles({ withLastMovements: false });
+      setStockArticles(arts || []);
+      return arts || [];
+    } finally {
+      setStockLoading(false);
+    }
+  }, [stockArticles]);
+
   const load = useCallback(async () => {
+    if (authLoading) return;
+    if (!user) {
+      setRequests([]);
+      setError('Session requise. Reconnectez-vous puis Actualiser.');
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError('');
     try {
-      const [rows, projs, arts] = await Promise.all([
+      // Liste seule = demandes (+ lignes pour totaux). Catalogue stock en lazy load.
+      const [rows, projs] = await Promise.all([
         listSiteMaterialRequests({
           statut: statutFilter,
           priorite: prioriteFilter,
           projectId: embeddedProjectId || undefined,
         }),
         embedded ? Promise.resolve(projet ? [projet] : []) : listProjects(),
-        // Pas d’historique mouvements ici — évite le spinner infini.
-        listStockArticles({ withLastMovements: false }),
       ]);
       setRequests(rows);
       setProjects(projs || []);
-      setStockArticles(arts || []);
     } catch (err) {
       setError(err.message || 'Erreur de chargement.');
     } finally {
       setLoading(false);
     }
-  }, [statutFilter, prioriteFilter, embeddedProjectId, embedded, projet]);
+  }, [authLoading, user, statutFilter, prioriteFilter, embeddedProjectId, embedded, projet]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -193,7 +213,7 @@ export default function DemandesChantier({ projet, embedded = false, onNavigate 
     setShowCreateMode(true);
   }
 
-  function openCreateCatalogue() {
+  async function openCreateCatalogue() {
     setShowCreateMode(false);
     setEditId(null);
     setFormMode('catalogue');
@@ -207,9 +227,10 @@ export default function DemandesChantier({ projet, embedded = false, onNavigate 
     setLines(buildInitialLines());
     setError('');
     setView('form');
+    await ensureStockArticles().catch(() => {});
   }
 
-  function openCreateManual() {
+  async function openCreateManual() {
     setShowCreateMode(false);
     setEditId(null);
     setFormMode('manuelle');
@@ -223,11 +244,13 @@ export default function DemandesChantier({ projet, embedded = false, onNavigate 
     setLines(buildManualLines());
     setError('');
     setView('form');
+    await ensureStockArticles().catch(() => {});
   }
 
   async function openEdit(id) {
     setSaving(true);
     try {
+      await ensureStockArticles().catch(() => {});
       const req = await getSiteMaterialRequest(id);
       const manual = isManualSiteRequest(req);
       setEditId(id);
@@ -274,6 +297,7 @@ export default function DemandesChantier({ projet, embedded = false, onNavigate 
   async function openDetail(id) {
     setSaving(true);
     try {
+      await ensureStockArticles().catch(() => {});
       const req = await getSiteMaterialRequest(id);
       setDetail(req);
       syncDetailRecap(req);
