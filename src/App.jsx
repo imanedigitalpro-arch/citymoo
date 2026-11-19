@@ -143,6 +143,7 @@ const NAV = [
     items: [
       { id: 'projets',            label: 'Projets',              icon: FolderOpen      },
       { id: 'demandes-engins',    label: "Location d'engins", icon: Truck },
+      { id: 'demandes-transport', label: 'Demandes de transport', icon: Truck },
       { id: 'sav-projets',        label: 'SAV',                  icon: AlertCircle     },
       { id: 'cr-sav',             label: 'Comptes rendus SAV',   icon: ClipboardCheck  },
     ],
@@ -234,6 +235,7 @@ const MODULE_LABELS = {
   'historique-interv': "Historique d'intervention",
   projets:             'Projets',
   'demandes-engins':   "Location d'engins",
+  'demandes-transport': 'Demandes de transport',
   'sav-projets':       'Service Apres-Vente',
   'cr-sav':            'Comptes rendus SAV',
   'mes-documents':     'Mes documents',
@@ -320,6 +322,7 @@ function PageContent({
     /* Projets */
     case 'projets':             return <Projets activeTab="projets" />;
     case 'demandes-engins':     return <Projets activeTab="demandes-engins" />;
+    case 'demandes-transport':  return <Projets activeTab="demandes-transport" />;
     case 'sav-projets':         return <Projets activeTab="sav-projets" />;
     case 'cr-sav':              return <Projets activeTab="cr-sav" />;
     /* SAV legacy */
