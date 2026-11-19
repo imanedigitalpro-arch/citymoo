@@ -72,17 +72,28 @@ async function requireUser() {
 export async function generateChargeRef() {
   const year = new Date().getFullYear();
   const prefix = `CHG-${year}-`;
-  const { data, error } = await getSupabase()
-    .from(TABLE)
-    .select('ref_charge')
-    .like('ref_charge', `${prefix}%`);
-  if (error) throw error;
-  let maxSeq = 0;
-  for (const row of data || []) {
-    const match = String(row.ref_charge || '').match(/-(\d{3,})$/);
-    if (match) maxSeq = Math.max(maxSeq, parseInt(match[1], 10));
+  // Anti-collision : en cas de créations parallèles, ne jamais réutiliser une ref existante.
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const { data, error } = await getSupabase()
+      .from(TABLE)
+      .select('ref_charge')
+      .like('ref_charge', `${prefix}%`);
+    if (error) throw error;
+    let maxSeq = 0;
+    for (const row of data || []) {
+      const match = String(row.ref_charge || '').match(/-(\d{3,})$/);
+      if (match) maxSeq = Math.max(maxSeq, parseInt(match[1], 10));
+    }
+    const candidate = `${prefix}${String(maxSeq + 1 + attempt).padStart(4, '0')}`;
+    const { data: existing, error: existsErr } = await getSupabase()
+      .from(TABLE)
+      .select('id')
+      .eq('ref_charge', candidate)
+      .limit(1);
+    if (existsErr) throw existsErr;
+    if (!existing?.length) return candidate;
   }
-  return `${prefix}${String(maxSeq + 1).padStart(3, '0')}`;
+  return `${prefix}${Date.now().toString().slice(-8)}`;
 }
 
 export async function assignChargeRefIfMissing(id, existingRef = '') {

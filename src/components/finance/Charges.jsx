@@ -8,6 +8,7 @@ import { useFinanceCharges } from '../../hooks/useFinanceCharges';
 import { useAuth } from '../../hooks/useAuth';
 import { can } from '../../services/admin/permissions';
 import { chargeDisplayRef, listProjectsForCharges } from '../../services/finance/charges';
+import { repairDuplicateChargeRefs } from '../../services/finance/repairDuplicateChargeRefs';
 import {
   isStockDiversCharge,
   parseDiversMetaFromCharge,
@@ -404,7 +405,7 @@ function DetailCharge({ charge, onBack, onEdit, onDelete, onValider, onComptabil
 
 export default function Charges({ categories, onNavigate }) {
   const { user } = useAuth();
-  const { records: charges, loading, error, save, remove } = useFinanceCharges();
+  const { records: charges, loading, error, save, remove, reload } = useFinanceCharges();
   const [search, setSearch] = useState('');
   const [filterStatut, setFilterStatut] = useState('');
   const [filterCat, setFilterCat] = useState('');
@@ -415,6 +416,7 @@ export default function Charges({ categories, onNavigate }) {
   const [detailId, setDetailId] = useState(null);
   const [projects, setProjects] = useState([]);
   const [canDelete, setCanDelete] = useState(true);
+  const [refRepairMsg, setRefRepairMsg] = useState('');
 
   useEffect(() => {
     let id;
@@ -427,6 +429,23 @@ export default function Charges({ categories, onNavigate }) {
     }
     if (id) setDetailId(id);
   }, []);
+
+  /** Répare les refs CHG en collision (cause du faux « doublons masqués » en prod) sans annuler. */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await repairDuplicateChargeRefs();
+        if (cancelled || !r?.repaired) return;
+        setRefRepairMsg(`${r.repaired} référence(s) CHG corrigée(s) (collision).`);
+        if (typeof reload === 'function') await reload();
+        setTimeout(() => { if (!cancelled) setRefRepairMsg(''); }, 5000);
+      } catch (err) {
+        console.warn('[CITYMO] repairDuplicateChargeRefs', err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [reload]);
 
   useEffect(() => {
     let cancelled = false;
@@ -535,6 +554,11 @@ export default function Charges({ categories, onNavigate }) {
     <div className="animate-fade-in">
       {error && (
         <div className="card" style={{ marginBottom: 12, padding: 12, color: 'var(--red)', fontSize: '0.85rem' }}>{error}</div>
+      )}
+      {refRepairMsg && (
+        <div className="card" style={{ marginBottom: 12, padding: 12, fontSize: '0.85rem', background: '#E8F5E9', border: '1px solid #A5D6A7', color: '#1B5E20' }}>
+          {refRepairMsg}
+        </div>
       )}
       {/* Header */}
       <div className="page-header flex-between finance-page-header">

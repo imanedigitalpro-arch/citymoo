@@ -20,6 +20,7 @@ import {
 import { computeDailyCashTotals, formatDateShortFr } from '../../services/finance/cashDayTotals';
 import { consolidateCashSheetTransactions } from '../../services/finance/cashSheetDisplay';
 import { auditRhFinanceSync } from '../../services/finance/financeDiagnostics';
+import { repairDuplicateChargeRefs } from '../../services/finance/repairDuplicateChargeRefs';
 import { notifyCashReviewCompleted } from '../../services/notifications/notificationEvents';
 import { exportCashSheetPdf, CASH_SHEET_PDF_VERSION } from '../../services/finance/cashSheetPdf';
 import { exportCashSheetExcel } from '../../services/finance/cashSheetExport';
@@ -215,9 +216,17 @@ export default function FeuilleCaisse() {
     let cancelled = false;
     (async () => {
       try {
+        // Avant tout sync : réparer les refs CHG en collision (évite faux doublons → Annulé).
+        const repaired = await repairDuplicateChargeRefs().catch((err) => {
+          console.warn('[CITYMO] repairDuplicateChargeRefs', err);
+          return null;
+        });
+        if (!cancelled && repaired?.repaired > 0) {
+          notify(`${repaired.repaired} référence(s) dépense corrigée(s) (collision CHG).`);
+        }
         const r = await runRhPaymentsCashBackfill();
         if (!cancelled) {
-          if (r.total > 0 || r.removed > 0 || r.legacyPurged > 0) await reload();
+          if (r.total > 0 || r.removed > 0 || r.legacyPurged > 0 || repaired?.repaired > 0) await reload();
           if (r.errors?.length) {
             notify(`${r.errors.length} erreur(s) sync RH — vérifiez RUN_FINANCE_TOUT_EN_UN.sql`);
           }
