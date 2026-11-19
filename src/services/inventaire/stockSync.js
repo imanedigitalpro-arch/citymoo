@@ -647,17 +647,34 @@ export function buildArticleEmplacementLedger(movements, emplacement, articleId)
 export async function rebuildStockLevelsFromMovements({ dryRun = true } = {}) {
   await requireSupabaseUserId();
 
-  const [{ data: movements, error: mErr }, currentLevels, { data: articles, error: aErr }] = await Promise.all([
-    getSupabase()
-      .from(MOVEMENTS)
-      .select('id, ref_mouvement, type_mouvement, article_id, quantite, date_mouvement, payload, created_at')
-      .order('date_mouvement', { ascending: true })
-      .order('created_at', { ascending: true }),
-    listAllStockLevels(),
-    getSupabase().from(ARTICLES).select('id, reference, nom, emplacement'),
-  ]);
-  if (mErr) throw mErr;
-  if (aErr) throw aErr;
+  // Pagination obligatoire : PostgREST coupe à 1000 lignes sinon (dry-run faux).
+  let movements;
+  let articles;
+  let currentLevels;
+  try {
+    [movements, currentLevels, articles] = await Promise.all([
+      fetchAllRows(
+        MOVEMENTS,
+        'id, ref_mouvement, type_mouvement, article_id, quantite, date_mouvement, payload, created_at',
+        [
+          { column: 'date_mouvement', ascending: true },
+          { column: 'created_at', ascending: true },
+          { column: 'id', ascending: true },
+        ],
+      ),
+      listAllStockLevels(),
+      fetchAllRows(
+        ARTICLES,
+        'id, reference, nom, emplacement',
+        [
+          { column: 'reference', ascending: true },
+          { column: 'id', ascending: true },
+        ],
+      ),
+    ]);
+  } catch (err) {
+    throw err;
+  }
 
   const applicable = (movements || []).filter(isMovementStockApplicable);
   const skipped = (movements || []).length - applicable.length;
