@@ -311,13 +311,19 @@ async function attachLastMovements(articles) {
   }));
 }
 
-export async function listStockArticles() {
+/**
+ * Liste catalogue + quantités.
+ * withLastMovements=false par défaut : éviter de charger tout stock_movements
+ * (bloque Demandes chantier / Inventaire). Opt-in pour écrans Stocks/Articles.
+ */
+export async function listStockArticles({ withLastMovements = false } = {}) {
   const data = await fetchAllRows(TABLE, '*', [
     { column: 'nom', ascending: true },
     { column: 'id', ascending: true },
   ]);
   const normalized = (data || []).map((r) => normalizeStockArticle(r)).filter(Boolean);
   const withStock = await attachStockQuantities(normalized);
+  if (!withLastMovements) return withStock;
   return attachLastMovements(withStock);
 }
 

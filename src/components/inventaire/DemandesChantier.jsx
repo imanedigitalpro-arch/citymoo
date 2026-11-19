@@ -155,7 +155,8 @@ export default function DemandesChantier({ projet, embedded = false, onNavigate 
           projectId: embeddedProjectId || undefined,
         }),
         embedded ? Promise.resolve(projet ? [projet] : []) : listProjects(),
-        listStockArticles(),
+        // Pas d’historique mouvements ici — évite le spinner infini.
+        listStockArticles({ withLastMovements: false }),
       ]);
       setRequests(rows);
       setProjects(projs || []);

@@ -286,6 +286,28 @@ async function replaceLines(requestId, lines, stockArticles) {
   return data || [];
 }
 
+async function loadLinesForRequests(requestIds = []) {
+  const ids = (requestIds || []).filter(Boolean);
+  if (!ids.length) return new Map();
+  const byRequest = new Map();
+  const PAGE = 200;
+  for (let i = 0; i < ids.length; i += PAGE) {
+    const chunk = ids.slice(i, i + PAGE);
+    const { data, error } = await getSupabase()
+      .from(LINES)
+      .select('*')
+      .in('request_id', chunk)
+      .order('line_order', { ascending: true });
+    if (error) throw error;
+    (data || []).forEach((line) => {
+      const rid = String(line.request_id || '');
+      if (!byRequest.has(rid)) byRequest.set(rid, []);
+      byRequest.get(rid).push(line);
+    });
+  }
+  return byRequest;
+}
+
 export async function listSiteMaterialRequests(filters = {}) {
   await requireUser();
   let q = getSupabase().from(TABLE).select('*').order('created_at', { ascending: false });
@@ -296,13 +318,14 @@ export async function listSiteMaterialRequests(filters = {}) {
   if (filters.chefProjet) q = q.ilike('chef_projet', `%${filters.chefProjet}%`);
   const { data, error } = await q;
   if (error) throw error;
-  const stockArticles = await listStockArticles().catch(() => []);
-  const results = [];
-  for (const row of data || []) {
-    const lines = await loadLines(row.id);
-    results.push(normalizeRequest(row, enrichLinesWithStock(lines, stockArticles)));
-  }
-  return results;
+  const rows = data || [];
+  // Catalogue léger (sans historique mouvements) — sinon la page reste en spinner.
+  const stockArticles = await listStockArticles({ withLastMovements: false }).catch(() => []);
+  const linesByRequest = await loadLinesForRequests(rows.map((r) => r.id));
+  return rows.map((row) => normalizeRequest(
+    row,
+    enrichLinesWithStock(linesByRequest.get(String(row.id)) || [], stockArticles),
+  ));
 }
 
 export async function getSiteMaterialRequest(id) {
@@ -310,7 +333,7 @@ export async function getSiteMaterialRequest(id) {
   const { data, error } = await getSupabase().from(TABLE).select('*').eq('id', id).maybeSingle();
   if (error) throw error;
   if (!data) return null;
-  const stockArticles = await listStockArticles().catch(() => []);
+  const stockArticles = await listStockArticles({ withLastMovements: false }).catch(() => []);
   const lines = enrichLinesWithStock(await loadLines(id), stockArticles);
   const history = await loadHistory(id);
   return normalizeRequest(data, lines, history);
@@ -320,7 +343,7 @@ export async function createSiteMaterialRequest(form, lines = [], { ipAddress } 
   const user = await requireUser();
   const actorName = await getProfileName(user.id);
   const actorRole = await getProfileRole(user.id);
-  const stockArticles = await listStockArticles().catch(() => []);
+  const stockArticles = await listStockArticles({ withLastMovements: false }).catch(() => []);
   const ref = form.ref || await generateSiteRequestRef();
   const montant = estimateMontant(lines, stockArticles);
   const row = {
@@ -373,7 +396,7 @@ export async function updateSiteMaterialRequest(id, form, lines = [], { ipAddres
   if (['livree', 'annulee'].includes(existing.statut)) {
     throw new Error('Demande clôturée — modification impossible.');
   }
-  const stockArticles = await listStockArticles().catch(() => []);
+  const stockArticles = await listStockArticles({ withLastMovements: false }).catch(() => []);
   const montant = estimateMontant(lines, stockArticles);
   const patch = {
     project_id: form.project_id ?? existing.project_id,
@@ -440,7 +463,7 @@ export async function updateSiteMaterialRequestHeader(id, fields = {}, { ipAddre
   const { data, error } = await getSupabase().from(TABLE).update(patch).eq('id', id).select().single();
   if (error) throw error;
   await logHistory(id, 'modification', 'Récap demande modifié', user.id, actorName, actorRole, ipAddress);
-  const stockArticles = await listStockArticles().catch(() => []);
+  const stockArticles = await listStockArticles({ withLastMovements: false }).catch(() => []);
   return normalizeRequest(
     data,
     enrichLinesWithStock(await loadLines(id), stockArticles),
@@ -477,7 +500,7 @@ export async function prepareSiteMaterialRequest(id, lineUpdates = [], {
   if (!req) throw new Error('Demande introuvable.');
   const actorName = await getProfileName(user.id);
   const actorRole = await getProfileRole(user.id);
-  const stockArticles = await listStockArticles().catch(() => []);
+  const stockArticles = await listStockArticles({ withLastMovements: false }).catch(() => []);
 
   const lines = (req.lines || []).map((line) => {
     const upd = lineUpdates.find((u) => u.id === line.id || (
@@ -613,7 +636,7 @@ export async function deliverSiteMaterialRequest(id, {
     ...l,
     quantite_livree: Number(l.quantite_preparee) || Number(l.quantite_demandee) || 0,
   }));
-  const stockArticles = await listStockArticles().catch(() => []);
+  const stockArticles = await listStockArticles({ withLastMovements: false }).catch(() => []);
   await replaceLines(id, updatedLines, stockArticles);
 
   const { data, error } = await getSupabase().from(TABLE).update({

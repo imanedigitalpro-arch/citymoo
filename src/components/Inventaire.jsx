@@ -27,7 +27,7 @@ export default function Inventaire({ activeTab, initialArticleCode, onArticleCod
   const [emplacementNoms, setEmplacementNoms] = useState(EMPLACEMENTS_STOCK);
 
   useEffect(() => {
-    listStockArticles()
+    listStockArticles({ withLastMovements: false })
       .then((rows) => setArticles(rows || []))
       .catch(() => {});
     listStockCategories()
@@ -42,7 +42,7 @@ export default function Inventaire({ activeTab, initialArticleCode, onArticleCod
 
   useEffect(() => {
     return subscribeStockChanged(() => {
-      listStockArticles()
+      listStockArticles({ withLastMovements: false })
         .then((rows) => setArticles(rows || []))
         .catch(() => {});
     });
