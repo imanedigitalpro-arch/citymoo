@@ -12,7 +12,37 @@ const TABLE = 'stock_articles';
 const LEVELS = 'stock_levels';
 const MOVEMENTS = 'stock_movements';
 
+/** PostgREST default max-rows is 1000; huge `.in()` lists also trigger HTTP 400. */
+const PAGE_SIZE = 1000;
+
 let catalogImportPromise = null;
+
+/**
+ * Lecture paginée seule — aucune écriture.
+ * @param {string} table
+ * @param {string} select
+ * @param {{ column: string, ascending?: boolean }[]} [orderBy]
+ */
+async function fetchAllRows(table, select, orderBy = []) {
+  const rows = [];
+  let from = 0;
+  for (;;) {
+    let query = getSupabase()
+      .from(table)
+      .select(select)
+      .range(from, from + PAGE_SIZE - 1);
+    for (const ord of orderBy) {
+      query = query.order(ord.column, { ascending: ord.ascending !== false });
+    }
+    const { data, error } = await query;
+    if (error) throw error;
+    const batch = data || [];
+    rows.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return rows;
+}
 
 const STATUT_UI = {
   Active: 'Actif',
@@ -178,16 +208,19 @@ export async function generateStockArticleCode() {
 async function sumLevelsByArticle(articleIds) {
   const sums = {};
   if (!articleIds.length) return sums;
-  const { data, error } = await getSupabase()
-    .from(LEVELS)
-    .select('article_id, quantite')
-    .in('article_id', articleIds);
-  if (error) {
-    if (error.code === '42P01') return null;
+  const wanted = new Set(articleIds.map(String));
+  let data;
+  try {
+    // Lecture globale puis filtre local — évite Bad Request sur .in() trop long.
+    data = await fetchAllRows(LEVELS, 'article_id, quantite');
+  } catch (error) {
+    if (error?.code === '42P01') return null;
     throw error;
   }
   (data || []).forEach((l) => {
-    sums[l.article_id] = (sums[l.article_id] || 0) + Number(l.quantite || 0);
+    const aid = String(l.article_id || '');
+    if (!wanted.has(aid)) return;
+    sums[aid] = (sums[aid] || 0) + Number(l.quantite || 0);
   });
   return sums;
 }
@@ -195,14 +228,12 @@ async function sumLevelsByArticle(articleIds) {
 async function sumMovementsByArticle(articleIds) {
   const sums = {};
   if (!articleIds.length) return sums;
-  const { data, error } = await getSupabase()
-    .from(MOVEMENTS)
-    .select('article_id, type_mouvement, quantite')
-    .in('article_id', articleIds);
-  if (error) throw error;
+  const wanted = new Set(articleIds.map(String));
+  const data = await fetchAllRows(MOVEMENTS, 'article_id, type_mouvement, quantite');
   (data || []).forEach((m) => {
-    if (!m.article_id) return;
-    sums[m.article_id] = (sums[m.article_id] || 0) + movementDelta(m.type_mouvement, m.quantite);
+    const aid = String(m.article_id || '');
+    if (!aid || !wanted.has(aid)) return;
+    sums[aid] = (sums[aid] || 0) + movementDelta(m.type_mouvement, m.quantite);
   });
   return sums;
 }
@@ -213,15 +244,15 @@ async function attachStockQuantities(articles) {
   const sums = await sumLevelsByArticle(ids);
   if (sums === null) {
     const fromMvts = await sumMovementsByArticle(ids);
-    return articles.map((a) => ({
-      ...a,
-      stock_actuel: Math.max(0, Number(fromMvts[a.id] ?? a.stock_actuel ?? 0)),
-      stock_source: 'movements',
-    }));
+  return articles.map((a) => ({
+    ...a,
+    stock_actuel: Math.max(0, Number(fromMvts[String(a.id)] ?? a.stock_actuel ?? 0)),
+    stock_source: 'movements',
+  }));
   }
   return articles.map((a) => ({
     ...a,
-    stock_actuel: Math.max(0, Number(sums[a.id] ?? 0)),
+    stock_actuel: Math.max(0, Number(sums[String(a.id)] ?? 0)),
     stock_source: 'levels',
   }));
 }
@@ -252,33 +283,39 @@ function summarizeLastMovement(row) {
 
 async function attachLastMovements(articles) {
   if (!articles.length) return articles;
-  const ids = articles.map((a) => a.id);
-  const { data, error } = await getSupabase()
-    .from(MOVEMENTS)
-    .select('article_id, date_mouvement, type_mouvement, motif, ref_mouvement, payload, created_at')
-    .in('article_id', ids)
-    .order('date_mouvement', { ascending: false })
-    .order('created_at', { ascending: false });
-  if (error) {
-    if (error.code === '42P01') return articles;
+  let data;
+  try {
+    // Lecture paginée des mouvements (pas de .in() massif) — affichage seul.
+    data = await fetchAllRows(
+      MOVEMENTS,
+      'article_id, date_mouvement, type_mouvement, motif, ref_mouvement, payload, created_at',
+      [
+        { column: 'date_mouvement', ascending: false },
+        { column: 'created_at', ascending: false },
+      ],
+    );
+  } catch (error) {
+    if (error?.code === '42P01') return articles;
     throw error;
   }
+  const wanted = new Set(articles.map((a) => String(a.id)));
   const lastByArticle = new Map();
   (data || []).forEach((row) => {
-    if (!lastByArticle.has(row.article_id)) lastByArticle.set(row.article_id, row);
+    const aid = String(row.article_id || '');
+    if (!aid || !wanted.has(aid) || lastByArticle.has(aid)) return;
+    lastByArticle.set(aid, row);
   });
   return articles.map((a) => ({
     ...a,
-    dernier_mouvement: summarizeLastMovement(lastByArticle.get(a.id)),
+    dernier_mouvement: summarizeLastMovement(lastByArticle.get(String(a.id))),
   }));
 }
 
 export async function listStockArticles() {
-  const { data, error } = await getSupabase()
-    .from(TABLE)
-    .select('*')
-    .order('nom', { ascending: true });
-  if (error) throw error;
+  const data = await fetchAllRows(TABLE, '*', [
+    { column: 'nom', ascending: true },
+    { column: 'id', ascending: true },
+  ]);
   const normalized = (data || []).map((r) => normalizeStockArticle(r)).filter(Boolean);
   const withStock = await attachStockQuantities(normalized);
   return attachLastMovements(withStock);
