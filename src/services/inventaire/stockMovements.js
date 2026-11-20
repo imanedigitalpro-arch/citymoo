@@ -128,19 +128,26 @@ function toMovementRowFromBon(bon, ligne, idx, uid, ref, statut, applied) {
   };
 }
 
+/**
+ * Next BM-YYYY-#### ref. Uses order+limit 1 so PostgREST's 1000-row cap
+ * cannot undercount the true max (zero-padded suffixes sort correctly).
+ */
 export async function generateMovementRef() {
   const y = new Date().getFullYear();
   const prefix = `BM-${y}-`;
   const { data, error } = await getSupabase()
     .from(TABLE)
     .select('ref_mouvement')
-    .ilike('ref_mouvement', `${prefix}%`);
+    .ilike('ref_mouvement', `${prefix}%`)
+    .order('ref_mouvement', { ascending: false })
+    .limit(1);
   if (error) throw error;
   let max = 0;
-  (data || []).forEach((r) => {
-    const m = String(r.ref_mouvement || '').match(/-(\d+)$/);
-    if (m) max = Math.max(max, parseInt(m[1], 10));
-  });
+  const top = data?.[0]?.ref_mouvement;
+  if (top) {
+    const m = String(top).match(/-(\d+)$/);
+    if (m) max = parseInt(m[1], 10) || 0;
+  }
   return `${prefix}${String(max + 1).padStart(4, '0')}`;
 }
 

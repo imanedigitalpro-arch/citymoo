@@ -91,6 +91,7 @@ export default function MouvementRapide({ articles = [], emplacementsList, onArt
   const [articleStock, setArticleStock] = useState(null);
   const [historique, setHistorique] = useState([]);
   const [loading, setLoading] = useState(false);
+  const submitInFlight = useRef(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [detailItem, setDetailItem] = useState(null);
@@ -408,6 +409,8 @@ export default function MouvementRapide({ articles = [], emplacementsList, onArt
   }
 
   async function handleSubmit() {
+    if (submitInFlight.current || loading) return;
+    submitInFlight.current = true;
     setLoading(true);
     setError('');
     try {
@@ -429,6 +432,7 @@ export default function MouvementRapide({ articles = [], emplacementsList, onArt
       setView('form');
     } finally {
       setLoading(false);
+      submitInFlight.current = false;
     }
   }
 
