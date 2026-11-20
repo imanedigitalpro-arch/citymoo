@@ -4,7 +4,6 @@
  * Préfixe MR- au lieu de BM- pour distinguer dans l'historique.
  */
 import { getSupabase } from '../../lib/supabase';
-import { requireSupabaseUserId } from '../supabase/requireUser';
 import {
   saveStockMovementBon,
   normalizeStockMovement,
@@ -21,20 +20,52 @@ import { cancelDiversExpensesForBon } from './stockDiversExpense';
 const TABLE = 'stock_movements';
 const ARTICLES = 'stock_articles';
 
+/**
+ * Next MR-YYYY-##### ref. Uses order+limit 1 so PostgREST's 1000-row cap
+ * cannot undercount the true max (zero-padded suffixes sort correctly).
+ */
 export async function generateMRRef() {
   const y = new Date().getFullYear();
   const prefix = `MR-${y}-`;
   const { data, error } = await getSupabase()
     .from(TABLE)
     .select('ref_mouvement')
-    .ilike('ref_mouvement', `${prefix}%`);
+    .ilike('ref_mouvement', `${prefix}%`)
+    .order('ref_mouvement', { ascending: false })
+    .limit(1);
   if (error) throw error;
   let max = 0;
-  (data || []).forEach((r) => {
-    const m = String(r.ref_mouvement || '').match(/-(\d+)$/);
-    if (m) max = Math.max(max, parseInt(m[1], 10));
-  });
+  const top = data?.[0]?.ref_mouvement;
+  if (top) {
+    const m = String(top).match(/-(\d+)$/);
+    if (m) max = parseInt(m[1], 10) || 0;
+  }
   return `${prefix}${String(max + 1).padStart(5, '0')}`;
+}
+
+const MR_REF_RETRY_MAX = 3;
+
+function isRefCollisionError(err) {
+  if (!err) return false;
+  if (err.code === '23505') return true;
+  const msg = String(err.message || '');
+  if (err.code === 'VALIDATION' && /déjà validé/i.test(msg)) return true;
+  return /duplicate|unique/i.test(msg);
+}
+
+/** Create with a fresh MR ref; retry if another applied bon already owns that ref. */
+async function saveMouvementRapideWithRefRetry(buildBon) {
+  let lastErr;
+  for (let attempt = 0; attempt < MR_REF_RETRY_MAX; attempt += 1) {
+    const ref = await generateMRRef();
+    try {
+      return await saveStockMovementBon(buildBon(ref));
+    } catch (err) {
+      lastErr = err;
+      if (!isRefCollisionError(err) || attempt === MR_REF_RETRY_MAX - 1) throw err;
+    }
+  }
+  throw lastErr;
 }
 
 /**
@@ -70,9 +101,7 @@ export async function saveMouvementRapide(form) {
   }
   assertMovementAllowedForArticle(article, form.type_mouvement);
 
-  const ref = await generateMRRef();
-
-  const bon = {
+  return saveMouvementRapideWithRefRetry((ref) => ({
     ref,
     type_mouvement: form.type_mouvement,
     emplacement_source: form.emplacement_source || '',
@@ -93,9 +122,7 @@ export async function saveMouvementRapide(form) {
       quantite: Number(form.quantite) || 0,
       notes: '',
     }],
-  };
-
-  return saveStockMovementBon(bon);
+  }));
 }
 
 /**
@@ -138,10 +165,7 @@ export async function annulerMouvementRapide(refOriginal, motifAnnulation, userN
     inverseDest = p.emplacement_source || '';
   }
 
-  const inverseRef = await generateMRRef();
-  const uid = await requireSupabaseUserId();
-
-  const inverseBon = {
+  const saved = await saveMouvementRapideWithRefRetry((inverseRef) => ({
     ref: inverseRef,
     type_mouvement: inverseType === 'Entree' ? 'Entrée' : inverseType,
     emplacement_source: inverseSrc,
@@ -156,9 +180,8 @@ export async function annulerMouvementRapide(refOriginal, motifAnnulation, userN
       quantite: Number(row.quantite) || 0,
       notes: '',
     })),
-  };
-
-  const saved = await saveStockMovementBon(inverseBon);
+  }));
+  const inverseRef = saved?.ref;
 
   // Mark original as cancelled + annuler dépenses générales DIVERS liées
   await cancelDiversExpensesForBon(data).catch((err) => {
