@@ -23,6 +23,20 @@ function normRole(role) {
   return norm(role).replace(/\s+/g, '_');
 }
 
+/** Achats processors who must see every DA (canViewAll) even if profiles.role is employé. */
+const CHARGEE_ACHATS_EMAILS = new Set([
+  'laila.wotfi@citymo.ma',
+  'l.timsih@citymo.ma',
+]);
+
+function isChargeeAchatsByIdentity(nom, email) {
+  if (CHARGEE_ACHATS_EMAILS.has(email)) return true;
+  if (nom.includes('laila') && nom.includes('wotfi')) return true;
+  // LOTFI TIMSIH — process all Demandes d'achat (override employé own-only filter)
+  if (nom.includes('lotfi') && nom.includes('timsih')) return true;
+  return false;
+}
+
 export function detectPurchaseRoleFromProfile(profile, user) {
   const email = (user?.email || profile?.email || '').toLowerCase();
   if (DG_EMAILS.has(email)) return PURCHASE_ROLES.DG;
@@ -31,7 +45,7 @@ export function detectPurchaseRoleFromProfile(profile, user) {
   const nom = norm(profile?.nom);
 
   if (role.includes('dg') || role.includes('directeur')) return PURCHASE_ROLES.DG;
-  if (role.includes('achat') || nom.includes('laila') && nom.includes('wotfi')) return PURCHASE_ROLES.CHARGEE_ACHATS;
+  if (role.includes('achat') || isChargeeAchatsByIdentity(nom, email)) return PURCHASE_ROLES.CHARGEE_ACHATS;
   if (role.includes('chef_projet') || role.includes('chef') && role.includes('projet')) return PURCHASE_ROLES.CHEF_PROJET;
   if (role.includes('magasin') || role.includes('inventaire') || role.includes('depot') || role.includes('logistique')) {
     return PURCHASE_ROLES.MAGASINIER;
