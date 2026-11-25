@@ -657,7 +657,7 @@ function GanttChart({
                   >
                     <GripVertical size={13} />
                   </span>
-                  <span style={{ fontWeight: 700, color: 'var(--text-3)', fontSize: '0.72rem' }}>{row.wbs_code || row.wbs}</span>
+                  <span style={{ fontWeight: 700, color: 'var(--text-3)', fontSize: '0.72rem' }}>{row.wbs}</span>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0, paddingLeft: isSummary ? 0 : 14 }}>
                     {isSummary ? (
                       <button
@@ -1273,7 +1273,7 @@ export default function ProjectPlanningGantt({
               return (
                 <article key={row.id} className="pj-task-card">
                   <div className="pj-task-card-head">
-                    <div className="pj-task-card-kicker">{row.wbs_code || row.wbs}</div>
+                    <div className="pj-task-card-kicker">{row.wbs}</div>
                     <span className="badge" style={{ background: st.bg, color: st.color }}>{st.label}</span>
                   </div>
                   <div className="pj-task-card-name">{row.nom}</div>
