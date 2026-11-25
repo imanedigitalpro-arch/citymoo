@@ -397,7 +397,7 @@ function GroupedDemandeForm({ initial, onSave, onCancel, saving, suppliers = [],
       <SectionTitle icon={<Layers size={12} />}>Informations générales</SectionTitle>
       <FRow>
         <FField label="Titre de la demande groupée" required>
-          <input value={form.titre} onChange={(e) => set('titre', e.target.value)} placeholder="ex. Achats multi-chantiers juin 2026" style={{ ...INPUT_STYLE, borderColor: errors.titre ? 'var(--red)' : 'var(--border)' }} />
+          <input value={form.titre} onChange={(e) => set('titre', e.target.value.toUpperCase())} placeholder="ex. Achats multi-chantiers juin 2026" style={{ ...INPUT_STYLE, borderColor: errors.titre ? 'var(--red)' : 'var(--border)', textTransform: 'uppercase' }} />
           {errors.titre && <div style={{ color: 'var(--red)', fontSize: '0.7rem', marginTop: 3 }}>{errors.titre}</div>}
         </FField>
         <FField label="Priorité">
@@ -561,9 +561,9 @@ function DemandeForm({ initial, onSave, onCancel, saving, suppliers = [], projec
         <FField label={isHorsProjet ? 'Objet / Titre de la demande' : 'Titre'} required>
           <input
             value={form.titre}
-            onChange={(e) => set('titre', e.target.value)}
+            onChange={(e) => set('titre', e.target.value.toUpperCase())}
             placeholder={isHorsProjet ? 'ex. Achat bureau, Consommables, Informatique...' : 'Titre de la demande...'}
-            style={{ ...INPUT_STYLE, borderColor: errors.titre ? 'var(--red)' : 'var(--border)' }}
+            style={{ ...INPUT_STYLE, borderColor: errors.titre ? 'var(--red)' : 'var(--border)', textTransform: 'uppercase' }}
           />
           {errors.titre && <div style={{ color: 'var(--red)', fontSize: '0.7rem', marginTop: 3 }}>{errors.titre}</div>}
         </FField>
@@ -769,7 +769,7 @@ function DaMobileCard({
   onStartTitleEdit, onTitleChange, onCommitTitleEdit, onCancelTitleEdit,
 }) {
   return (
-    <article className="achats-da-card">
+    <article className="achats-da-card" style={{ textTransform: 'uppercase' }}>
       <div className="achats-da-card-head">
         <span className="achats-da-card-ref">{item.ref}</span>
         <span className={`badge ${getPurchaseStatusBadge(item.statut)}`} style={{ fontSize: '0.68rem' }}>
@@ -788,7 +788,7 @@ function DaMobileCard({
             }}
             autoFocus
             disabled={titleSavingId === item.id}
-            style={{ ...INPUT_STYLE, fontWeight: 600, fontSize: '0.9rem', width: '100%' }}
+            style={{ ...INPUT_STYLE, fontWeight: 600, fontSize: '0.9rem', width: '100%', textTransform: 'uppercase' }}
           />
         ) : (
           <button
@@ -1042,7 +1042,11 @@ export default function DemandesAchat() {
           }}
           onRefresh={reload}
         />
-        <Modal open={modalMode !== null} onClose={closeModal} title={
+        <Modal
+          open={modalMode !== null}
+          onClose={closeModal}
+          closeOnBackdrop={!!editItem}
+          title={
           editItem
             ? (isGroupedPurchaseRequest(editItem) ? 'Modifier achats groupés' : (superAdmin && editItem.statut !== 'Brouillon' ? 'Modifier la demande (super admin)' : 'Modifier la demande'))
             : (modalMode === 'grouped' ? 'Achats groupés' : "Nouvelle demande d'achat")
@@ -1187,7 +1191,7 @@ export default function DemandesAchat() {
                     <th>Actions</th>
                   </tr>
                 </thead>
-                <tbody>
+                <tbody style={{ textTransform: 'uppercase' }}>
                   {filteredSorted.map((x) => (
                     <tr key={x.id}>
                       <td><span style={{ fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: '0.82rem', color: 'var(--red)' }}>{x.ref}</span></td>
@@ -1203,7 +1207,7 @@ export default function DemandesAchat() {
                             }}
                             autoFocus
                             disabled={titleSavingId === x.id}
-                            style={{ ...INPUT_STYLE, fontWeight: 600, fontSize: '0.87rem', padding: '5px 8px' }}
+                            style={{ ...INPUT_STYLE, fontWeight: 600, fontSize: '0.87rem', padding: '5px 8px', textTransform: 'uppercase' }}
                           />
                         ) : (
                           <div
@@ -1297,7 +1301,11 @@ export default function DemandesAchat() {
         )}
       </div>
 
-      <Modal open={modalMode !== null} onClose={closeModal} title={
+      <Modal
+        open={modalMode !== null}
+        onClose={closeModal}
+        closeOnBackdrop={!!editItem}
+        title={
         editItem
           ? (isGroupedPurchaseRequest(editItem) ? 'Modifier achats groupés' : (superAdmin && editItem.statut !== 'Brouillon' ? 'Modifier la demande (super admin)' : 'Modifier la demande'))
           : (modalMode === 'grouped' ? 'Achats groupés' : "Nouvelle demande d'achat")
