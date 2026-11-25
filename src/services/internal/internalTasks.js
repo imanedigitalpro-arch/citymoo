@@ -365,11 +365,14 @@ export function applyTaskVisibility(tasks, user) {
   return (tasks || []).filter((t) => canViewDgTask(t, user));
 }
 
-/** Périmètre utilisateur : employés = leurs tâches assignées ; DG/Admin = tout. */
+/** Périmètre utilisateur : employés = tâches créées ou assignées ; DG/Admin = tout. */
 export function applyTasksUserScope(tasks, user) {
   const visible = applyTaskVisibility(tasks, user);
   if (canManageTaskDgPush(user)) return visible;
-  return visible.filter((t) => userMatchesAssignee(user, t.assigne));
+  if (!user?.id) return [];
+  return visible.filter((t) =>
+    (t.created_by && t.created_by === user.id) || userMatchesAssignee(user, t.assigne),
+  );
 }
 
 export function splitTasksByCategory(tasks, user) {
