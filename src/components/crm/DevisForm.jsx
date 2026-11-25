@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, Fragment } from 'react';
 import { createPortal } from 'react-dom';
 import {
   ChevronLeft, Trash2, Copy, AlertCircle,
@@ -946,6 +946,15 @@ export default function DevisForm({ devis, onBack, onSaved, saving = false }) {
     }
   }
 
+  useEffect(() => {
+    if (editingIdx == null) return;
+    requestAnimationFrame(() => {
+      const nodes = document.querySelectorAll('[data-devis-inline-composer]');
+      const el = [...nodes].find((n) => n.offsetParent !== null) || nodes[0];
+      el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+  }, [editingIdx]);
+
   async function handleArticleSelect(articleId) {
     if (!articleId) {
       setDraft((p) => ({ ...p, article_id: '' }));
@@ -1329,21 +1338,43 @@ export default function DevisForm({ devis, onBack, onSaved, saving = false }) {
                         {form.lignes.map((ligne, idx) => {
                           const lineNum = ligne.type === 'article' ? ++articleLineNum : null;
                           return (
-                            <DevisLineDisplay
-                              key={ligne._id}
-                              ligne={ligne}
-                              lineNum={lineNum}
-                              idx={idx}
-                              articles={articles}
-                              onDelete={deleteLigne}
-                              onDuplicate={duplicateLigne}
-                              onEdit={startEditLine}
-                              drag={{
-                                ...dragHandlers,
-                                isDragging: dragHandlers.isDragging(idx),
-                                isOver: dragHandlers.isOver(idx),
-                              }}
-                            />
+                            <Fragment key={ligne._id}>
+                              <DevisLineDisplay
+                                ligne={ligne}
+                                lineNum={lineNum}
+                                idx={idx}
+                                articles={articles}
+                                onDelete={deleteLigne}
+                                onDuplicate={duplicateLigne}
+                                onEdit={startEditLine}
+                                drag={{
+                                  ...dragHandlers,
+                                  isDragging: dragHandlers.isDragging(idx),
+                                  isOver: dragHandlers.isOver(idx),
+                                }}
+                              />
+                              {editingIdx === idx && (
+                                <tr>
+                                  <td colSpan={8} style={{ padding: '12px 8px 16px', background: '#FFF', borderBottom: '2px solid var(--border)' }}>
+                                    <div data-devis-inline-composer>
+                                      <LigneComposer
+                                        draft={draft}
+                                        setDraft={setDraft}
+                                        categories={categories}
+                                        articles={articles}
+                                        onArticleSelect={handleArticleSelect}
+                                        onOk={commitDraft}
+                                        onClear={resetDraft}
+                                        onAddTitre={() => handleDraftModeChange('titre')}
+                                        onAddSousTitre={() => handleDraftModeChange('sous_titre')}
+                                        editingIdx={editingIdx}
+                                        draftError={draftError}
+                                      />
+                                    </div>
+                                  </td>
+                                </tr>
+                              )}
+                            </Fragment>
                           );
                         })}
                       </tbody>
@@ -1356,16 +1387,34 @@ export default function DevisForm({ devis, onBack, onSaved, saving = false }) {
                       return form.lignes.map((ligne, idx) => {
                         const lineNum = ligne.type === 'article' ? ++n : null;
                         return (
-                          <DevisLineCard
-                            key={ligne._id}
-                            ligne={ligne}
-                            lineNum={lineNum}
-                            idx={idx}
-                            articles={articles}
-                            onDelete={deleteLigne}
-                            onDuplicate={duplicateLigne}
-                            onEdit={startEditLine}
-                          />
+                          <Fragment key={ligne._id}>
+                            <DevisLineCard
+                              ligne={ligne}
+                              lineNum={lineNum}
+                              idx={idx}
+                              articles={articles}
+                              onDelete={deleteLigne}
+                              onDuplicate={duplicateLigne}
+                              onEdit={startEditLine}
+                            />
+                            {editingIdx === idx && (
+                              <div data-devis-inline-composer style={{ margin: '8px 0 12px' }}>
+                                <LigneComposer
+                                  draft={draft}
+                                  setDraft={setDraft}
+                                  categories={categories}
+                                  articles={articles}
+                                  onArticleSelect={handleArticleSelect}
+                                  onOk={commitDraft}
+                                  onClear={resetDraft}
+                                  onAddTitre={() => handleDraftModeChange('titre')}
+                                  onAddSousTitre={() => handleDraftModeChange('sous_titre')}
+                                  editingIdx={editingIdx}
+                                  draftError={draftError}
+                                />
+                              </div>
+                            )}
+                          </Fragment>
                         );
                       });
                     })()}
@@ -1391,19 +1440,21 @@ export default function DevisForm({ devis, onBack, onSaved, saving = false }) {
                 </div>
               </div>
 
-              <LigneComposer
-                draft={draft}
-                setDraft={setDraft}
-                categories={categories}
-                articles={articles}
-                onArticleSelect={handleArticleSelect}
-                onOk={commitDraft}
-                onClear={resetDraft}
-                onAddTitre={() => handleDraftModeChange('titre')}
-                onAddSousTitre={() => handleDraftModeChange('sous_titre')}
-                editingIdx={editingIdx}
-                draftError={draftError}
-              />
+              {editingIdx == null && (
+                <LigneComposer
+                  draft={draft}
+                  setDraft={setDraft}
+                  categories={categories}
+                  articles={articles}
+                  onArticleSelect={handleArticleSelect}
+                  onOk={commitDraft}
+                  onClear={resetDraft}
+                  onAddTitre={() => handleDraftModeChange('titre')}
+                  onAddSousTitre={() => handleDraftModeChange('sous_titre')}
+                  editingIdx={editingIdx}
+                  draftError={draftError}
+                />
+              )}
             </div>
 
             <div className="card" style={{ padding: '20px 22px' }}>
