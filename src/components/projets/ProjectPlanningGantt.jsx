@@ -5,12 +5,14 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Plus, Edit2, Trash2, Download, Filter, X, Loader2, AlertCircle,
   ChevronLeft, ChevronRight, ChevronDown, ChevronUp, RefreshCw, Upload, FileSpreadsheet,
+  GripVertical,
 } from 'lucide-react';
 import {
   listProjectPlanningTasks,
   createProjectPlanningTask,
   updateProjectPlanningTask,
   deleteProjectPlanningTask,
+  reorderProjectPlanningTasks,
   shiftPlanningTaskDates,
   filterPlanningTasks,
   importPlanningWbsTemplate,
@@ -28,6 +30,7 @@ import {
 import { generateProjectPlanningPdfSynthesis, generateProjectPlanningPdfDetailed } from '../../services/projects/projectPlanningPdf';
 import { exportPlanningTasksCsv } from '../../services/projects/projectPlanningExport';
 import {
+  PLANNING_LOTS,
   PLANNING_STATUTS,
   mergePlanningLots,
   planningStatutMeta,
@@ -538,12 +541,15 @@ function GanttChart({
   onDelete,
   onShift,
   onBarChange,
+  onReorderRows,
   taskById,
 }) {
   const leftBodyRef = useRef(null);
   const rightBodyRef = useRef(null);
   const rightHdrRef = useRef(null);
   const syncing = useRef(false);
+  const [dragId, setDragId] = useState(null);
+  const [overId, setOverId] = useState(null);
 
   useEffect(() => {
     const body = rightBodyRef.current;
@@ -578,7 +584,7 @@ function GanttChart({
     if (rightHdrRef.current) rightHdrRef.current.scrollLeft = e.target.scrollLeft;
   }
 
-  const leftGrid = '36px 1fr 52px 76px 76px 44px';
+  const leftGrid = '22px 36px 1fr 52px 76px 76px 44px';
 
   return (
     <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden', background: '#fff' }}>
@@ -591,6 +597,7 @@ function GanttChart({
             borderBottom: '1px solid var(--border)',
           }}
           >
+            <span />
             <span>#</span>
             <span>Nom de la tâche</span>
             <span>Durée</span>
@@ -606,17 +613,50 @@ function GanttChart({
             {displayRows.map((row, i) => {
               const isSummary = row.type === 'summary';
               const st = planningStatutMeta(row.statut);
+              const isDragging = !isSummary && dragId === row.id;
+              const isOver = !isSummary && overId === row.id && dragId && dragId !== row.id;
               return (
                 <div
                   key={row.id}
+                  draggable={!isSummary}
+                  onDragStart={(e) => {
+                    if (isSummary) return;
+                    setDragId(row.id);
+                    setOverId(null);
+                    e.dataTransfer.effectAllowed = 'move';
+                    e.dataTransfer.setData('text/plain', row.id);
+                  }}
+                  onDragOver={(e) => {
+                    if (isSummary || !dragId || dragId === row.id) return;
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                    if (overId !== row.id) setOverId(row.id);
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    if (isSummary || !dragId || dragId === row.id) return;
+                    onReorderRows?.(dragId, row.id);
+                    setDragId(null);
+                    setOverId(null);
+                  }}
+                  onDragEnd={() => { setDragId(null); setOverId(null); }}
                   style={{
                     display: 'grid', gridTemplateColumns: leftGrid, gap: 4,
                     alignItems: 'center', height: ROW_H, padding: '0 8px',
                     borderBottom: '1px solid var(--border)',
-                    background: i % 2 === 0 ? '#fff' : '#F7F8FA',
+                    background: isOver ? '#FFF5F5' : (i % 2 === 0 ? '#fff' : '#F7F8FA'),
                     fontSize: '0.78rem',
+                    opacity: isDragging ? 0.55 : 1,
+                    boxShadow: isOver ? 'inset 0 2px 0 var(--red)' : undefined,
+                    cursor: isSummary ? 'default' : 'grab',
                   }}
                 >
+                  <span
+                    title={isSummary ? undefined : 'Glisser pour réorganiser'}
+                    style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-3)', visibility: isSummary ? 'hidden' : 'visible' }}
+                  >
+                    <GripVertical size={13} />
+                  </span>
                   <span style={{ fontWeight: 700, color: 'var(--text-3)', fontSize: '0.72rem' }}>{row.wbs_code || row.wbs}</span>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0, paddingLeft: isSummary ? 0 : 14 }}>
                     {isSummary ? (
@@ -949,6 +989,73 @@ export default function ProjectPlanningGantt({
     }
   }
 
+  async function handleReorderRows(fromId, toId) {
+    if (!fromId || !toId || fromId === toId) return;
+    const from = tasks.find((t) => t.id === fromId);
+    const to = tasks.find((t) => t.id === toId);
+    if (!from || !to) return;
+    const lotKey = (v) => v.lot || 'Autre';
+    if (lotKey(from) !== lotKey(to)) {
+      setToast('Réordonnez uniquement dans le même lot.');
+      return;
+    }
+
+    const sorted = [...tasks].sort((a, b) => {
+      const oa = Number(a.ordre) || 0;
+      const ob = Number(b.ordre) || 0;
+      if (oa !== ob) return oa - ob;
+      return String(a.created_at || '').localeCompare(String(b.created_at || ''));
+    });
+
+    const lot = lotKey(from);
+    const indices = [];
+    const lotItems = [];
+    sorted.forEach((t, i) => {
+      if (lotKey(t) === lot) {
+        indices.push(i);
+        lotItems.push(t);
+      }
+    });
+    const fromIdx = lotItems.findIndex((t) => t.id === fromId);
+    const toIdx = lotItems.findIndex((t) => t.id === toId);
+    if (fromIdx < 0 || toIdx < 0 || fromIdx === toIdx) return;
+
+    const nextLot = [...lotItems];
+    const [moved] = nextLot.splice(fromIdx, 1);
+    nextLot.splice(toIdx, 0, moved);
+
+    const next = [...sorted];
+    indices.forEach((globalIdx, j) => {
+      next[globalIdx] = nextLot[j];
+    });
+
+    // Keep lot blocks contiguous in PLANNING_LOTS order after intra-lot move
+    const byLot = {};
+    next.forEach((t) => {
+      const k = lotKey(t);
+      if (!byLot[k]) byLot[k] = [];
+      byLot[k].push(t);
+    });
+    const lotOrder = [
+      ...PLANNING_LOTS.filter((l) => byLot[l]),
+      ...Object.keys(byLot).filter((l) => !PLANNING_LOTS.includes(l)),
+    ];
+    const rebuilt = [];
+    lotOrder.forEach((l) => { (byLot[l] || []).forEach((t) => rebuilt.push(t)); });
+    const withOrdre = rebuilt.map((t, i) => ({ ...t, ordre: (i + 1) * 10 }));
+
+    const prev = tasks;
+    setTasks(withOrdre);
+    try {
+      await reorderProjectPlanningTasks(withOrdre.map((t) => t.id));
+      setToast('Ordre des lignes mis à jour.');
+      onReload?.();
+    } catch (err) {
+      setTasks(prev);
+      setError(err.message || 'Erreur réordonnancement.');
+    }
+  }
+
   async function handleExportPdf(mode) {
     try {
       if (mode === 'synthesis') {
@@ -1129,6 +1236,7 @@ export default function ProjectPlanningGantt({
               onDelete={handleDelete}
               onShift={handleShift}
               onBarChange={handleBarChange}
+              onReorderRows={handleReorderRows}
               taskById={taskById}
             />
           </div>

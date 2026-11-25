@@ -250,6 +250,24 @@ export async function deleteProjectPlanningTask(id) {
   }
 }
 
+/** Persiste l'ordre des tâches planning (glisser-déposer lignes Gantt). */
+export async function reorderProjectPlanningTasks(orderedIds = []) {
+  const ids = (orderedIds || []).filter(Boolean);
+  if (!ids.length) return;
+  await getAuthUserId();
+  const sb = getSupabase();
+  for (let i = 0; i < ids.length; i += 1) {
+    const { error } = await sb
+      .from(TABLE)
+      .update({ ordre: (i + 1) * 10 })
+      .eq('id', ids[i]);
+    if (error) {
+      console.error('[CITYMO] project_planning_tasks reorder', error);
+      throw error;
+    }
+  }
+}
+
 export async function updatePlanningTaskProgress(id, avancement, statut) {
   await getAuthUserId();
   const payload = {
@@ -564,8 +582,13 @@ export function buildGanttDisplayRows(tasks, collapsedLots = new Set()) {
   let idx = 0;
 
   lotOrder.forEach((lot) => {
-    const lotTasks = byLot[lot];
-    if (!lotTasks?.length) return;
+    const lotTasks = [...(byLot[lot] || [])].sort((a, b) => {
+      const oa = Number(a.ordre) || 0;
+      const ob = Number(b.ordre) || 0;
+      if (oa !== ob) return oa - ob;
+      return String(a.created_at || '').localeCompare(String(b.created_at || ''));
+    });
+    if (!lotTasks.length) return;
     idx += 1;
     const starts = lotTasks.map((t) => t.date_debut).filter(Boolean).sort();
     const ends = lotTasks.map((t) => t.date_fin || t.date_debut).filter(Boolean).sort();
