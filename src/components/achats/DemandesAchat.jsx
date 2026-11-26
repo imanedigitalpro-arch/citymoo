@@ -733,12 +733,12 @@ function comparePurchaseRequests(a, b) {
 }
 
 function DaRowActions({
-  item, perms, superAdmin, userEmail, submittingId, pdfLoadingId, onView, onEdit, onPrintPdf, onSubmit, onAddQuote, onDelete,
+  item, perms, superAdmin, userEmail, user, submittingId, pdfLoadingId, onView, onEdit, onPrintPdf, onSubmit, onAddQuote, onDelete,
 }) {
   return (
     <div className="achats-da-actions">
       <button type="button" className="btn btn-secondary btn-sm" title="Voir" onClick={() => onView(item.id)}><Eye size={13} /></button>
-      {canEditPurchaseRequest(item.statut, { isSuperAdmin: superAdmin, userEmail }) && (
+      {canEditPurchaseRequest(item.statut, { isSuperAdmin: superAdmin, userEmail, user }) && (
         <button type="button" className="btn btn-ghost btn-sm" title={superAdmin && item.statut !== 'Brouillon' ? 'Modifier (super admin)' : 'Modifier'} onClick={() => onEdit(item)}><Edit2 size={13} /></button>
       )}
       <button type="button" className="btn btn-ghost btn-sm" title="PDF" disabled={pdfLoadingId === item.id} onClick={() => onPrintPdf(item)}>
@@ -763,7 +763,7 @@ function DaRowActions({
 }
 
 function DaMobileCard({
-  item, perms, superAdmin, userEmail, submittingId, pdfLoadingId,
+  item, perms, superAdmin, userEmail, user, submittingId, pdfLoadingId,
   titleEditId, titleEditValue, titleSavingId, canEditTitle,
   onView, onEdit, onPrintPdf, onSubmit, onAddQuote, onDelete,
   onStartTitleEdit, onTitleChange, onCommitTitleEdit, onCancelTitleEdit,
@@ -814,6 +814,7 @@ function DaMobileCard({
         perms={perms}
         superAdmin={superAdmin}
         userEmail={userEmail}
+        user={user}
         submittingId={submittingId}
         pdfLoadingId={pdfLoadingId}
         onView={onView}
@@ -1034,7 +1035,7 @@ export default function DemandesAchat() {
               window.alert('Demande introuvable.');
               return;
             }
-            if (!canEditPurchaseRequest(item.statut, { isSuperAdmin: superAdmin, userEmail: user?.email })) {
+            if (!canEditPurchaseRequest(item.statut, { isSuperAdmin: superAdmin, userEmail: user?.email, user })) {
               window.alert('Cette demande ne peut plus être modifiée après validation DG.');
               return;
             }
@@ -1253,6 +1254,7 @@ export default function DemandesAchat() {
                           perms={perms}
                           superAdmin={superAdmin}
                           userEmail={user?.email}
+                          user={user}
                           submittingId={submittingId}
                           pdfLoadingId={pdfLoadingId}
                           onView={setDetailId}
@@ -1277,6 +1279,7 @@ export default function DemandesAchat() {
                     perms={perms}
                     superAdmin={superAdmin}
                     userEmail={user?.email}
+                    user={user}
                     submittingId={submittingId}
                     pdfLoadingId={pdfLoadingId}
                     titleEditId={titleEditId}

@@ -202,12 +202,12 @@ export const OP_ACHATS_STATUS_BADGE = {
   'En attente': 'badge-orange',
 };
 
-export function canEditPurchaseRequest(statut, { isSuperAdmin = false, userEmail = '' } = {}) {
+export function canEditPurchaseRequest(statut, { isSuperAdmin = false, userEmail = '', user = null } = {}) {
   const s = normalizePurchaseStatus(statut);
   if (s === 'Refusée') return false;
   if (s === 'Brouillon') return true;
   if (isSuperAdmin) return true;
-  if (canPreDgEditPurchaseByEmail(userEmail) && isPurchaseStatusBeforeDgValidation(s)) return true;
+  if (canPreDgEditPurchaseByEmail(userEmail || user?.email, user) && isPurchaseStatusBeforeDgValidation(s)) return true;
   return false;
 }
 
@@ -215,10 +215,27 @@ export function canEditPurchaseRequest(statut, { isSuperAdmin = false, userEmail
 export const PURCHASE_PRE_DG_EDIT_EMAILS = new Set([
   'h.zirari@citymo.ma',
   'n.fatihi@citymo.ma',
+  'y.mojab@citymo.ma',
+  'yassir.mojab@citymo.ma',
 ]);
 
-export function canPreDgEditPurchaseByEmail(email) {
-  return PURCHASE_PRE_DG_EDIT_EMAILS.has(String(email || '').toLowerCase().trim());
+function normalizePersonLabel(value) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Comptes autorisés à modifier une DA avant validation DG (email ou identité connue). */
+export function canPreDgEditPurchaseByEmail(email, user = null) {
+  const e = String(email || user?.email || '').toLowerCase().trim();
+  if (PURCHASE_PRE_DG_EDIT_EMAILS.has(e)) return true;
+  const nom = normalizePersonLabel(user?.nom);
+  // Yassir Mojab — chef de projet (profil souvent en rôle employé)
+  if (nom.includes('yassir') && nom.includes('mojab')) return true;
+  return false;
 }
 
 /** Statuts avant validation DG (Devis validé et suivants = plus de modif pour ces comptes). */
