@@ -635,15 +635,10 @@ export default function DemandeAchatDetail({
 
   const projectDisplay = purchaseRequestProjectLabel(request);
   const isGrouped = isGroupedPurchaseRequest(request);
+  // Titre de la DA et désignation des lignes restent indépendants (même avec 1 seule ligne).
   const besoinsLines = isGrouped
     ? (request.payload?.lines || [])
-    : (() => {
-      const lines = normalizeRequestLines(request);
-      if (lines.length === 1 && request.titre) {
-        return [{ ...lines[0], designation: request.titre }];
-      }
-      return lines;
-    })();
+    : normalizeRequestLines(request);
 
   const canEdit = canEditPurchaseRequest(request.statut, { isSuperAdmin: superAdmin, userEmail: user?.email });
   const isTerminal = ['Clôturée', 'Refusée'].includes(request.statut);

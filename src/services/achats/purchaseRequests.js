@@ -358,25 +358,11 @@ export async function updatePurchaseRequestTitle(id, titre) {
     throw err;
   }
 
-  const { data: existing, error: fetchErr } = await getSupabase()
-    .from(TABLE)
-    .select('payload')
-    .eq('id', id)
-    .maybeSingle();
-  if (fetchErr) throw fetchErr;
-
-  const payload = { ...(existing?.payload || {}) };
-  const lines = [...(payload.lines || [])];
-  if (lines.length === 1) {
-    lines[0] = { ...lines[0], designation: trimmed };
-    payload.lines = lines;
-  } else if (!lines.length) {
-    payload.lines = [{ designation: trimmed, quantite: null, unite: 'u' }];
-  }
-
+  // Ne pas synchroniser la désignation des lignes : le titre de la demande
+  // reste indépendant même s'il n'y a qu'une seule ligne de besoin.
   const { data, error } = await getSupabase()
     .from(TABLE)
-    .update({ titre: trimmed, payload })
+    .update({ titre: trimmed })
     .eq('id', id)
     .select()
     .single();
