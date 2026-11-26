@@ -211,7 +211,7 @@ export async function updatePurchaseRequestWorkflow(id, form) {
   if (status === 'Brouillon') {
     return updatePurchaseRequestDraft(id, form);
   }
-  if (isPurchaseStatusBeforeDgValidation(status) && canPreDgEditPurchaseByEmail(ctx.user?.email)) {
+  if (isPurchaseStatusBeforeDgValidation(status) && canPreDgEditPurchaseByEmail(ctx.user?.email, { ...ctx.user, nom: ctx.userName })) {
     return updatePurchaseRequestPreDg(id, form, existing, ctx);
   }
   await assertSuperAdmin(ctx);
@@ -219,12 +219,12 @@ export async function updatePurchaseRequestWorkflow(id, form) {
 }
 
 /**
- * Modification DA avant validation DG — réservée à h.zirari / n.fatihi.
+ * Modification DA avant validation DG — réservée aux comptes pré-DG (ex. h.zirari, n.fatihi, y.mojab).
  * Pas de sync OA/OP (créés après validation DG).
  */
 export async function updatePurchaseRequestPreDg(id, form, existing = null, ctx = null) {
   const authCtx = ctx || await getAuthContext();
-  if (!canPreDgEditPurchaseByEmail(authCtx.user?.email)) {
+  if (!canPreDgEditPurchaseByEmail(authCtx.user?.email, { ...authCtx.user, nom: authCtx.userName })) {
     const err = new Error('Modification non autorisée.');
     err.code = 'VALIDATION';
     throw err;

@@ -640,7 +640,7 @@ export default function DemandeAchatDetail({
     ? (request.payload?.lines || [])
     : normalizeRequestLines(request);
 
-  const canEdit = canEditPurchaseRequest(request.statut, { isSuperAdmin: superAdmin, userEmail: user?.email });
+  const canEdit = canEditPurchaseRequest(request.statut, { isSuperAdmin: superAdmin, userEmail: user?.email, user });
   const isTerminal = ['Clôturée', 'Refusée'].includes(request.statut);
   const canManageQuotesOnRequest = perms.canManageQuotes && canAddQuoteToRequest(request.statut);
   const canSuperAdminEditSelectedQuote = superAdmin && !!request.selected_quote_id && !isTerminal;
