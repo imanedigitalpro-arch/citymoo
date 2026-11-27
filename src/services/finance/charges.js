@@ -9,6 +9,27 @@ import { removeProjectExpenseForCharge, syncChargeToProjectExpense } from './pro
 
 const TABLE = 'finance_charges';
 
+/** PostgREST default max-rows is 1000 — sans pagination le module sous-charge les totaux. */
+const PAGE_SIZE = 1000;
+
+async function fetchAllFinanceChargeRows(select = '*') {
+  const rows = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await getSupabase()
+      .from(TABLE)
+      .select(select)
+      .order('date_charge', { ascending: false })
+      .range(from, from + PAGE_SIZE - 1);
+    if (error) throw error;
+    const batch = data || [];
+    rows.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return rows;
+}
+
 export function normalizeCharge(row) {
   if (!row) return null;
   return {
@@ -141,11 +162,7 @@ export async function listFinanceCharges({ reconcileRefs = false } = {}) {
   if (reconcileRefs) {
     await reconcileMissingChargeRefs().catch(() => 0);
   }
-  const { data, error } = await getSupabase()
-    .from(TABLE)
-    .select('*')
-    .order('date_charge', { ascending: false });
-  if (error) throw error;
+  const data = await fetchAllFinanceChargeRows('*');
   return (data || []).map(normalizeCharge);
 }
 
