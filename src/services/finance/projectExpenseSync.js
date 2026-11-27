@@ -24,6 +24,33 @@ const SKIP_STATUTS = ['Annulé', 'Refusé', 'Refusée', 'Brouillon'];
 const OP_PAID_STATUTS = ['Payé'];
 const WORKER_EXPENSE_CATEGORY = "Main d'œuvre";
 
+/** PostgREST default max-rows is 1000 — sans pagination la sync rate des sources. */
+const PAGE_SIZE = 1000;
+
+/**
+ * Lecture paginée seule pour alimenter la sync.
+ * Aucun changement de filtre métier / upsert / delete.
+ */
+async function fetchAllSyncSourceRows(table, select, applyFilters) {
+  const rows = [];
+  let from = 0;
+  for (;;) {
+    let query = getSupabase()
+      .from(table)
+      .select(select)
+      .order('id', { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+    if (typeof applyFilters === 'function') query = applyFilters(query);
+    const { data, error } = await query;
+    if (error) throw error;
+    const batch = data || [];
+    rows.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return rows;
+}
+
 function isActiveStatut(statut) {
   return statut && !SKIP_STATUTS.includes(statut);
 }
@@ -229,8 +256,7 @@ export async function syncWorkerPaymentToProjectExpense({ entity, sourceType, so
 }
 
 async function syncCharges(stats, resolveProject) {
-  const { data, error } = await getSupabase().from('finance_charges').select('*');
-  if (error) throw error;
+  const data = await fetchAllSyncSourceRows('finance_charges', '*');
 
   for (const c of (data || []).filter((row) => row.project_id || String(row.projet_lie || '').trim())) {
     if (!isChargePaidForProject(c)) { stats.skipped++; continue; }
@@ -248,11 +274,11 @@ async function syncCharges(stats, resolveProject) {
 }
 
 async function syncPaymentOrders(stats, resolveProject) {
-  const { data, error } = await getSupabase()
-    .from('payment_orders')
-    .select('*')
-    .not('project_id', 'is', null);
-  if (error) throw error;
+  const data = await fetchAllSyncSourceRows(
+    'payment_orders',
+    '*',
+    (q) => q.not('project_id', 'is', null),
+  );
 
   for (const o of data || []) {
     if (!isPaidOpStatut(o.statut)) { stats.skipped++; continue; }
@@ -285,11 +311,11 @@ async function syncPaymentOrders(stats, resolveProject) {
 }
 
 async function syncAcquisitionOrders(stats, resolveProject) {
-  const { data, error } = await getSupabase()
-    .from('purchase_acquisition_orders')
-    .select('*')
-    .not('project_id', 'is', null);
-  if (error) throw error;
+  const data = await fetchAllSyncSourceRows(
+    'purchase_acquisition_orders',
+    '*',
+    (q) => q.not('project_id', 'is', null),
+  );
 
   for (const o of data || []) {
     if (!isActiveStatut(o.statut)) { stats.skipped++; continue; }
@@ -325,11 +351,11 @@ async function syncAcquisitionOrders(stats, resolveProject) {
 }
 
 async function syncPurchaseRequests(stats, resolveProject) {
-  const { data, error } = await getSupabase()
-    .from('purchase_requests')
-    .select('*, purchase_request_quotes ( id, montant_ttc, supplier_name, statut )')
-    .not('project_id', 'is', null);
-  if (error) throw error;
+  const data = await fetchAllSyncSourceRows(
+    'purchase_requests',
+    '*, purchase_request_quotes ( id, montant_ttc, supplier_name, statut )',
+    (q) => q.not('project_id', 'is', null),
+  );
 
   for (const r of data || []) {
     if (!isActiveStatut(r.statut)) { stats.skipped++; continue; }
