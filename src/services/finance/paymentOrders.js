@@ -7,6 +7,28 @@ import { syncPaymentOrderPaidOutcome } from './paymentOrderPaidSync';
 
 const TABLE = 'payment_orders';
 
+/** PostgREST default max-rows is 1000 — sans pagination les listes OP sont tronquées. */
+const PAGE_SIZE = 1000;
+
+async function fetchAllPaymentOrderRows(select = '*') {
+  const rows = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await getSupabase()
+      .from(TABLE)
+      .select(select)
+      .order('date_ordre', { ascending: false })
+      .order('id', { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+    if (error) throw error;
+    const batch = data || [];
+    rows.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return rows;
+}
+
 export const PAYMENT_ORDER_STATUTS = ['À préparer', 'Initié', 'Payé'];
 
 const PAYMENT_ORDER_STATUS_LABELS = {
@@ -200,11 +222,7 @@ export async function listPaymentOrders({ reconcileRefs = false } = {}) {
       console.warn('[CITYMO] reconcile payment order refs', err);
     });
   }
-  const { data, error } = await getSupabase()
-    .from(TABLE)
-    .select('*')
-    .order('date_ordre', { ascending: false });
-  if (error) throw error;
+  const data = await fetchAllPaymentOrderRows('*');
   return (data || []).map(normalizePaymentOrder);
 }
 

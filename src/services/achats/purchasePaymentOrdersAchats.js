@@ -10,6 +10,9 @@ import { notifyPaymentOrderCreated, notifyPaymentInitiated, notifyPaymentValidat
 
 const TABLE = 'payment_orders';
 
+/** PostgREST default max-rows is 1000 — sans pagination les OP achats sont tronqués. */
+const PAGE_SIZE = 1000;
+
 export function normalizeAchatsPaymentOrder(row) {
   const base = normalizePaymentOrder(row);
   if (!base) return null;
@@ -28,16 +31,26 @@ export function normalizeAchatsPaymentOrder(row) {
 }
 
 export async function listAchatsPaymentOrders() {
-  const { data, error } = await getSupabase()
-    .from(TABLE)
-    .select('*')
-    .not('purchase_request_id', 'is', null)
-    .order('created_at', { ascending: false });
-  if (error) {
-    if (error.code === '42P01') return [];
-    throw error;
+  const rows = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await getSupabase()
+      .from(TABLE)
+      .select('*')
+      .not('purchase_request_id', 'is', null)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+    if (error) {
+      if (error.code === '42P01') return [];
+      throw error;
+    }
+    const batch = data || [];
+    rows.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
   }
-  return (data || []).map(normalizeAchatsPaymentOrder);
+  return rows.map(normalizeAchatsPaymentOrder);
 }
 
 export async function getAchatsPaymentOrder(id) {

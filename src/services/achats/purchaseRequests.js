@@ -11,6 +11,9 @@ import { getSiteRequestMissingLines } from '../inventaire/siteMaterialRequests';
 const TABLE = 'purchase_requests';
 const ACHATS_DEPARTMENT_ID = 3;
 
+/** PostgREST default max-rows is 1000 — sans pagination la liste DA est tronquée. */
+const PAGE_SIZE = 1000;
+
 export const PURCHASE_REQUEST_SELECT = '*, projects ( id, nom, ref, client_nom )';
 
 /** Libellé achats : nom du projet uniquement (colonne « Nom projet »). */
@@ -219,12 +222,22 @@ export async function reconcileMissingPurchaseRequestRefs() {
 
 export async function listPurchaseRequests() {
   await requireUser();
-  const { data, error } = await getSupabase()
-    .from(TABLE)
-    .select(PURCHASE_REQUEST_SELECT)
-    .order('created_at', { ascending: false });
-  if (error) throw error;
-  return (data || []).map(normalizePurchaseRequest);
+  const rows = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await getSupabase()
+      .from(TABLE)
+      .select(PURCHASE_REQUEST_SELECT)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+    if (error) throw error;
+    const batch = data || [];
+    rows.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return rows.map(normalizePurchaseRequest);
 }
 
 export async function createPurchaseRequest(form) {
