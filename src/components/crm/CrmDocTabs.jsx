@@ -1,8 +1,9 @@
-/** Onglets Factures comptables ↔ Proformas (même page CRM) */
+/** Onglets Factures comptables ↔ Proformas ↔ Acomptes (même page CRM) */
 export default function CrmDocTabs({ active, onChange }) {
   const tabs = [
     { id: 'factures', label: 'Factures' },
     { id: 'proformas', label: 'Proformas' },
+    { id: 'acomptes', label: 'Acomptes' },
   ];
   return (
     <div
