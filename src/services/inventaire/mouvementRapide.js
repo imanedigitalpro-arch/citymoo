@@ -20,6 +20,9 @@ import { cancelDiversExpensesForBon } from './stockDiversExpense';
 const TABLE = 'stock_movements';
 const ARTICLES = 'stock_articles';
 
+/** PostgREST default max-rows is 1000 — liste MR-* paginée (lecture seule). */
+const PAGE_SIZE = 1000;
+
 /**
  * Next MR-YYYY-##### ref. Uses order+limit 1 so PostgREST's 1000-row cap
  * cannot undercount the true max (zero-padded suffixes sort correctly).
@@ -208,16 +211,27 @@ export async function annulerMouvementRapide(refOriginal, motifAnnulation, userN
 
 /**
  * Liste les mouvements rapides (MR-*).
+ * Lecture paginée seule — aucune écriture / aucun recalcul de stock.
  */
 export async function listMouvementsRapides() {
-  const { data, error } = await getSupabase()
-    .from(TABLE)
-    .select('*, stock_articles(reference, nom)')
-    .ilike('ref_mouvement', 'MR-%')
-    .order('date_mouvement', { ascending: false })
-    .order('created_at', { ascending: false });
-  if (error) throw error;
-  return (data || []).map((row) => normalizeStockMovement(row));
+  const rows = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await getSupabase()
+      .from(TABLE)
+      .select('*, stock_articles(reference, nom)')
+      .ilike('ref_mouvement', 'MR-%')
+      .order('date_mouvement', { ascending: false })
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+    if (error) throw error;
+    const batch = data || [];
+    rows.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return rows.map((row) => normalizeStockMovement(row));
 }
 
 /**
