@@ -217,6 +217,10 @@ export default function Factures() {
   }, []);
 
   useEffect(() => {
+    setPage(1);
+  }, [docKind]);
+
+  useEffect(() => {
     if (!configured) return;
     let cancelled = false;
     let stopRepair = () => {};
@@ -237,22 +241,28 @@ export default function Factures() {
   }, [configured, factures.length]);
 
   /* Derived */
-  const commerciaux = [...new Set(factures.map(f => f.commercial).filter(Boolean))];
+  const isAcomptesTab = docKind === 'acomptes';
+  const listFactures = (factures || []).filter((f) => (
+    isAcomptesTab ? f.facture_type === 'acompte' : f.facture_type !== 'acompte'
+  ));
+  const commerciaux = [...new Set(listFactures.map(f => f.commercial).filter(Boolean))];
 
   /* Filter + sort */
-  const archiveRows = importedArchives
-    .filter((a) => archiveMatchesFactureFilters(a, {
-      search,
-      statut: filterStatut,
-      commercial: filterCommercial,
-      client_id: filterClient,
-      date: filterDate,
-      montant_min: filterMontantMin,
-    }))
-    .map(archiveToFactureRow);
+  const archiveRows = isAcomptesTab
+    ? []
+    : importedArchives
+      .filter((a) => archiveMatchesFactureFilters(a, {
+        search,
+        statut: filterStatut,
+        commercial: filterCommercial,
+        client_id: filterClient,
+        date: filterDate,
+        montant_min: filterMontantMin,
+      }))
+      .map(archiveToFactureRow);
 
   const filtered = [
-    ...filterCrmFactures(factures, {
+    ...filterCrmFactures(listFactures, {
       search,
       statut: filterStatut,
       commercial: filterCommercial,
@@ -281,19 +291,21 @@ export default function Factures() {
     setPage(1);
   }
 
-  /* KPIs */
-  const kpi = computeCrmFactureStats(factures);
-  const archiveMontantTotal = importedArchives.reduce(
-    (s, a) => s + (normalizeArchiveAmounts(a).total_ttc || 0),
-    0,
-  );
-  const totalFactureCount = factures.length + importedArchives.length;
+  /* KPIs — calculés sur l’onglet courant (factures vs acomptes) */
+  const kpi = computeCrmFactureStats(listFactures);
+  const archiveMontantTotal = isAcomptesTab
+    ? 0
+    : importedArchives.reduce(
+      (s, a) => s + (normalizeArchiveAmounts(a).total_ttc || 0),
+      0,
+    );
+  const totalFactureCount = listFactures.length + (isAcomptesTab ? 0 : importedArchives.length);
   const totalFacture   = kpi.totalFacture + archiveMontantTotal;
   const totalEncaisse  = kpi.totalEncaisse;
   const totalReste     = kpi.totalReste;
   const nImpayees      = kpi.nImpayees;
   const nEnRetard      = kpi.nEnRetard;
-  const totalAcomptes  = kpi.totalAcomptes;
+  const totalAcomptes  = computeCrmFactureStats(factures).totalAcomptes;
 
   /* Handlers */
   function openCreate()   { setEditing(null); setView('form'); }
@@ -411,23 +423,35 @@ export default function Factures() {
       {/* Page header */}
       <div className="page-header" style={{ marginBottom: 12 }}>
         <div>
-          <h1 className="page-title">Factures</h1>
-          <p className="page-subtitle">Gestion des factures, paiements et suivi des reglements.</p>
+          <h1 className="page-title">{isAcomptesTab ? "Factures d'acompte" : 'Factures'}</h1>
+          <p className="page-subtitle">
+            {isAcomptesTab
+              ? 'Acomptes (AC-) séparés des factures comptables — à côté des proformas.'
+              : 'Gestion des factures, paiements et suivi des reglements.'}
+          </p>
         </div>
         <div className="crm-page-header-actions" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button className="btn btn-ghost" onClick={load} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <RefreshCw size={14} />
           </button>
-          <button className="btn btn-ghost" onClick={openAcompte} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <Plus size={15} /> Facture acompte
-          </button>
-          <button className="btn btn-primary" onClick={openCreate} disabled={!configured || saving} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <Plus size={15} /> Ajouter une facture
-          </button>
+          {isAcomptesTab ? (
+            <button className="btn btn-primary" onClick={openAcompte} disabled={!configured || saving} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Plus size={15} /> Facture acompte
+            </button>
+          ) : (
+            <>
+              <button className="btn btn-ghost" onClick={openAcompte} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <Plus size={15} /> Facture acompte
+              </button>
+              <button className="btn btn-primary" onClick={openCreate} disabled={!configured || saving} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <Plus size={15} /> Ajouter une facture
+              </button>
+            </>
+          )}
         </div>
       </div>
 
-      <CrmDocTabs active="factures" onChange={setDocKind} />
+      <CrmDocTabs active={docKind === 'acomptes' ? 'acomptes' : 'factures'} onChange={setDocKind} />
 
       {!configured && (
         <div style={{ background: '#FFF3E0', border: '1px solid #FFB74D', borderRadius: 'var(--radius)', padding: '10px 16px', marginBottom: 16, fontSize: '0.85rem', color: '#E65100' }}>
