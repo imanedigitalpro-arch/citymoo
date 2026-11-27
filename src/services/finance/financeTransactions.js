@@ -26,6 +26,39 @@ export { syncFacturePaymentsToCash } from './financeSync';
 
 const TABLE = 'finance_transactions';
 
+/** PostgREST default max-rows is 1000 — sans pagination la feuille de caisse sous-charge les totaux. */
+const PAGE_SIZE = 1000;
+
+async function fetchAllFinanceTransactionRows({ year, month } = {}) {
+  const rows = [];
+  let from = 0;
+  for (;;) {
+    let q = getSupabase()
+      .from(TABLE)
+      .select('*')
+      .order('date_operation', { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+    if (year && month) {
+      const start = `${year}-${String(month).padStart(2, '0')}-01`;
+      const endMonth = month === 12 ? 1 : month + 1;
+      const endYear = month === 12 ? year + 1 : year;
+      const end = `${endYear}-${String(endMonth).padStart(2, '0')}-01`;
+      q = q.gte('date_operation', start).lt('date_operation', end);
+    } else if (year && !month) {
+      const start = `${year}-01-01`;
+      const end = `${year + 1}-01-01`;
+      q = q.gte('date_operation', start).lt('date_operation', end);
+    }
+    const { data, error } = await q;
+    if (error) throw error;
+    const batch = data || [];
+    rows.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return rows;
+}
+
 export const TYPES_ENTREE = [
   { value: 'alimentation_caisse', label: 'Alimentation caisse' },
   { value: 'reglement_client', label: 'Règlement client' },
@@ -95,20 +128,7 @@ export function toTransactionRow(form) {
 }
 
 export async function listFinanceTransactions({ year, month } = {}) {
-  let q = getSupabase().from(TABLE).select('*').order('date_operation', { ascending: true });
-  if (year && month) {
-    const start = `${year}-${String(month).padStart(2, '0')}-01`;
-    const endMonth = month === 12 ? 1 : month + 1;
-    const endYear = month === 12 ? year + 1 : year;
-    const end = `${endYear}-${String(endMonth).padStart(2, '0')}-01`;
-    q = q.gte('date_operation', start).lt('date_operation', end);
-  } else if (year && !month) {
-    const start = `${year}-01-01`;
-    const end = `${year + 1}-01-01`;
-    q = q.gte('date_operation', start).lt('date_operation', end);
-  }
-  const { data, error } = await q;
-  if (error) throw error;
+  const data = await fetchAllFinanceTransactionRows({ year, month });
   return (data || []).map(normalizeTransaction);
 }
 
