@@ -8,6 +8,9 @@ import { compactProjectLinkLabel } from './purchaseRequests';
 
 const TABLE = 'purchase_acquisition_orders';
 
+/** PostgREST default max-rows is 1000 — sans pagination la liste OA est tronquée. */
+const PAGE_SIZE = 1000;
+
 export function acquisitionOrderProjectLabel(ordre) {
   if (!ordre) return '—';
   const hasProject = ordre.project_id || ordre.project_ref || ordre.project_name;
@@ -73,15 +76,25 @@ async function requireUser() {
 export async function listAcquisitionOrders() {
   await requireUser();
   await reconcileDraftAcquisitionOrders().catch(() => {});
-  const { data, error } = await getSupabase()
-    .from(TABLE)
-    .select('*')
-    .order('created_at', { ascending: false });
-  if (error) {
-    if (error.code === '42P01') return [];
-    throw error;
+  const rows = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await getSupabase()
+      .from(TABLE)
+      .select('*')
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+    if (error) {
+      if (error.code === '42P01') return [];
+      throw error;
+    }
+    const batch = data || [];
+    rows.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
   }
-  return (data || []).map(normalizeAcquisitionOrder);
+  return rows.map(normalizeAcquisitionOrder);
 }
 
 export async function getAcquisitionOrder(id) {
