@@ -12,6 +12,35 @@ const TABLE = 'stock_movements';
 const LEVELS = 'stock_levels';
 const ARTICLES = 'stock_articles';
 
+/** PostgREST default max-rows is 1000 — sans pagination l’historique bons est tronqué. */
+const PAGE_SIZE = 1000;
+const MOVEMENT_LIST_SELECT = '*, stock_articles(reference, nom)';
+
+/**
+ * Lecture paginée seule (listes UI). N’écrit rien ; ordre stable via id pour .range.
+ */
+async function fetchAllStockMovementListRows({ refIlike } = {}) {
+  const rows = [];
+  let from = 0;
+  for (;;) {
+    let query = getSupabase()
+      .from(TABLE)
+      .select(MOVEMENT_LIST_SELECT)
+      .order('date_mouvement', { ascending: false })
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+    if (refIlike) query = query.ilike('ref_mouvement', refIlike);
+    const { data, error } = await query;
+    if (error) throw error;
+    const batch = data || [];
+    rows.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return rows;
+}
+
 const TYPE_TO_DB = {
   Entrée: 'Entree',
   Sortie: 'Sortie',
@@ -152,22 +181,12 @@ export async function generateMovementRef() {
 }
 
 export async function listStockMovements() {
-  const { data, error } = await getSupabase()
-    .from(TABLE)
-    .select('*, stock_articles(reference, nom)')
-    .order('date_mouvement', { ascending: false })
-    .order('created_at', { ascending: false });
-  if (error) throw error;
+  const data = await fetchAllStockMovementListRows();
   return (data || []).map((row) => normalizeStockMovement(row));
 }
 
 export async function listStockMovementBons() {
-  const { data, error } = await getSupabase()
-    .from(TABLE)
-    .select('*, stock_articles(reference, nom)')
-    .order('date_mouvement', { ascending: false })
-    .order('created_at', { ascending: false });
-  if (error) throw error;
+  const data = await fetchAllStockMovementListRows();
 
   const byRef = new Map();
   (data || []).forEach((row) => {
