@@ -12,6 +12,33 @@ export const config = { maxDuration: 60 };
 
 const CHARGE_SYNC_STATUT = 'Payé';
 
+/** PostgREST default max-rows is 1000 — sans pagination la sync rate des charges. */
+const PAGE_SIZE = 1000;
+
+const CHARGE_SYNC_SELECT =
+  'id, project_id, projet_lie, date_charge, libelle, categorie, fournisseur, montant, mode_paiement, statut, ref_charge, commentaire';
+
+/** Lecture paginée seule — mêmes filtres métier qu’avant. */
+async function fetchAllPaidLinkedCharges(admin) {
+  const rows = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await admin
+      .from('finance_charges')
+      .select(CHARGE_SYNC_SELECT)
+      .eq('statut', CHARGE_SYNC_STATUT)
+      .or('project_id.not.is.null,projet_lie.not.is.null')
+      .order('id', { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+    if (error) throw error;
+    const batch = data || [];
+    rows.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return rows;
+}
+
 function chargeRow(charge, projectId) {
   return {
     project_id: projectId,
@@ -61,17 +88,20 @@ export default async function handler(req, res) {
       return res.status(403).json({ error: 'Compte désactivé.' });
     }
 
-    const [{ data: projects }, { data: charges, error: chargesErr }] = await Promise.all([
-      admin.from('projects').select('id, ref, nom'),
-      admin
-        .from('finance_charges')
-        .select('id, project_id, projet_lie, date_charge, libelle, categorie, fournisseur, montant, mode_paiement, statut, ref_charge, commentaire')
-        .eq('statut', CHARGE_SYNC_STATUT)
-        .or('project_id.not.is.null,projet_lie.not.is.null'),
-    ]);
-
-    if (chargesErr) {
-      return res.status(500).json({ error: chargesErr.message });
+    let projects;
+    let charges;
+    try {
+      const [projectsRes, chargesRows] = await Promise.all([
+        admin.from('projects').select('id, ref, nom'),
+        fetchAllPaidLinkedCharges(admin),
+      ]);
+      if (projectsRes.error) {
+        return res.status(500).json({ error: projectsRes.error.message });
+      }
+      projects = projectsRes.data;
+      charges = chargesRows;
+    } catch (chargesErr) {
+      return res.status(500).json({ error: chargesErr.message || 'Erreur lecture charges.' });
     }
 
     const indexes = buildProjectIndexes(projects || []);
