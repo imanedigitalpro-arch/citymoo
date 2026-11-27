@@ -11,6 +11,31 @@ import {
 
 const TABLE = 'project_expenses';
 
+/** PostgREST default max-rows is 1000 — sans pagination le module sous-charge les totaux. */
+const PAGE_SIZE = 1000;
+
+async function fetchAllProjectExpenseRows(select, { project_id, origine, statut } = {}) {
+  const rows = [];
+  let from = 0;
+  for (;;) {
+    let query = getSupabase()
+      .from(TABLE)
+      .select(select)
+      .order('date_depense', { ascending: false })
+      .range(from, from + PAGE_SIZE - 1);
+    if (project_id) query = query.eq('project_id', project_id);
+    if (origine) query = query.eq('origine', origine);
+    if (statut) query = query.eq('statut', statut);
+    const { data, error } = await query;
+    if (error) throw error;
+    const batch = data || [];
+    rows.push(...batch);
+    if (batch.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return rows;
+}
+
 export const ORIGINE_LABELS = {
   import_excel: 'Import Excel initial',
   achat: 'Achat',
@@ -131,19 +156,20 @@ function toRow(form, userId) {
 }
 
 export async function listProjectExpenses(filters = {}) {
-  let q = getSupabase()
-    .from(TABLE)
-    .select(filters.withProjectJoin ? SELECT : LIST_SELECT)
-    .order('date_depense', { ascending: false });
-  if (filters.project_id) q = q.eq('project_id', filters.project_id);
-  if (filters.origine) q = q.eq('origine', filters.origine);
-  if (filters.statut) q = q.eq('statut', filters.statut);
-  const { data, error } = await q;
-  if (error) {
+  try {
+    const data = await fetchAllProjectExpenseRows(
+      filters.withProjectJoin ? SELECT : LIST_SELECT,
+      {
+        project_id: filters.project_id,
+        origine: filters.origine,
+        statut: filters.statut,
+      },
+    );
+    return (data || []).map(normalizeProjectExpense);
+  } catch (error) {
     console.error('[CITYMO] project_expenses list', error);
     throw error;
   }
-  return (data || []).map(normalizeProjectExpense);
 }
 
 export async function createProjectExpense(form) {
