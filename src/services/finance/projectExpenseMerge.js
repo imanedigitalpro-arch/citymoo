@@ -167,25 +167,45 @@ async function fetchLinkedChargesViaApi() {
   }
 }
 
-export async function fetchLinkedChargesForProjects() {
-  const { data, error } = await getSupabase()
-    .from('finance_charges')
-    .select('id, project_id, projet_lie, date_charge, libelle, categorie, fournisseur, montant, mode_paiement, statut, ref_charge, commentaire')
-    .or('project_id.not.is.null,projet_lie.not.is.null')
-    .order('date_charge', { ascending: false });
+const CHARGES_PAGE_SIZE = 1000;
+const CHARGES_SELECT = 'id, project_id, projet_lie, date_charge, libelle, categorie, fournisseur, montant, mode_paiement, statut, ref_charge, commentaire';
 
-  if (!error && Array.isArray(data) && data.length) {
-    return data.filter(
-      (c) => (c.project_id || String(c.projet_lie || '').trim())
-        && (isChargePaidForProject(c) || isChargeEligibleForBackfill(c)),
-    );
+async function fetchAllLinkedChargeRows() {
+  const rows = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await getSupabase()
+      .from('finance_charges')
+      .select(CHARGES_SELECT)
+      .or('project_id.not.is.null,projet_lie.not.is.null')
+      .order('date_charge', { ascending: false })
+      .range(from, from + CHARGES_PAGE_SIZE - 1);
+    if (error) throw error;
+    const batch = data || [];
+    rows.push(...batch);
+    if (batch.length < CHARGES_PAGE_SIZE) break;
+    from += CHARGES_PAGE_SIZE;
+  }
+  return rows;
+}
+
+export async function fetchLinkedChargesForProjects() {
+  try {
+    const data = await fetchAllLinkedChargeRows();
+    if (Array.isArray(data) && data.length) {
+      return data.filter(
+        (c) => (c.project_id || String(c.projet_lie || '').trim())
+          && (isChargePaidForProject(c) || isChargeEligibleForBackfill(c)),
+      );
+    }
+  } catch (error) {
+    console.warn('[CITYMO] linked charges', error.message);
   }
 
   const viaApi = await fetchLinkedChargesViaApi();
   if (viaApi.length) return viaApi;
 
-  if (error) console.warn('[CITYMO] linked charges', error.message);
-  return data || [];
+  return [];
 }
 
 export async function syncChargesToProjectsViaApi() {
