@@ -7,6 +7,9 @@ import { requireSupabaseUserId } from '../supabase/requireUser';
 const TABLE = 'finance_categories';
 const CHARGES_TABLE = 'finance_charges';
 
+/** PostgREST default max-rows is 1000 — sinon les compteurs de catégories sont tronqués. */
+const CHARGES_PAGE_SIZE = 1000;
+
 export function normalizeChargeCategory(row) {
   if (!row) return null;
   return {
@@ -29,12 +32,32 @@ export function toChargeCategoryRow(form) {
   };
 }
 
+async function fetchAllChargeCountRows() {
+  const rows = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await getSupabase()
+      .from(CHARGES_TABLE)
+      .select('id, categorie, category_id')
+      .order('id', { ascending: true })
+      .range(from, from + CHARGES_PAGE_SIZE - 1);
+    if (error) throw error;
+    const batch = data || [];
+    rows.push(...batch);
+    if (batch.length < CHARGES_PAGE_SIZE) break;
+    from += CHARGES_PAGE_SIZE;
+  }
+  return rows;
+}
+
 async function attachChargeCounts(categories) {
   if (!categories.length) return categories;
-  const { data: charges, error } = await getSupabase()
-    .from(CHARGES_TABLE)
-    .select('id, categorie, category_id');
-  if (error) return categories;
+  let charges;
+  try {
+    charges = await fetchAllChargeCountRows();
+  } catch {
+    return categories;
+  }
   const counts = {};
   (charges || []).forEach((c) => {
     if (c.category_id) counts[c.category_id] = (counts[c.category_id] || 0) + 1;
